@@ -1,4 +1,9 @@
 (function () {
+  const SPEED = 220;
+  const ACCEL = 1200;
+  const FRICTION = 1600;
+  const MAX_VEL = 240;
+
   const preventDefaultScroll = (event) => {
     if (event.touches && event.touches.length > 1) {
       return;
@@ -67,6 +72,7 @@
 
       this.hp = 100;
       this.facing = config.facing === -1 ? -1 : 1;
+      this.isAttacking = false;
 
       scene.physics.add.existing(this);
       const body = /** @type {Phaser.Physics.Arcade.Body} */ (this.body);
@@ -125,10 +131,18 @@
       this.dt = 0;
       this._centeredElements = [];
       this.inputState = {
-        left: false,
-        right: false,
-        punch: false,
-        kick: false,
+        p1: {
+          left: false,
+          right: false,
+          punch: false,
+          kick: false,
+        },
+        p2: {
+          left: false,
+          right: false,
+          punch: false,
+          kick: false,
+        },
       };
       this._momentaryActions = new Set();
       this._touchButtonsByKey = {};
@@ -139,12 +153,24 @@
         gap: 16,
       };
       this._pointerHoldStates = {
-        left: new Set(),
-        right: new Set(),
+        p1: {
+          left: new Set(),
+          right: new Set(),
+        },
+        p2: {
+          left: new Set(),
+          right: new Set(),
+        },
       };
       this._keyboardHoldStates = {
-        left: false,
-        right: false,
+        p1: {
+          left: false,
+          right: false,
+        },
+        p2: {
+          left: false,
+          right: false,
+        },
       };
       const nav = typeof navigator !== 'undefined' ? navigator : null;
       const hasTouchSupport =
@@ -205,9 +231,64 @@
 
     update(time, delta) {
       this.dt = Math.min(delta, 50) / 1000;
+      const dt = this.dt;
       this.clearMomentaryActions();
 
-      this._fighters.forEach((fighter) => fighter.update(this.dt));
+      if (this._fighters && this._fighters.length) {
+        const [p1, p2] = this._fighters;
+        if (p1) {
+          this.updateFighterMovement(p1, this.inputState.p1, p2, dt);
+        }
+        if (p2) {
+          this.updateFighterMovement(p2, this.inputState.p2, p1, dt);
+        }
+      }
+
+      this._fighters.forEach((fighter) => fighter.update(dt));
+    }
+
+    updateFighterMovement(fighter, input, opponent, dt) {
+      if (!fighter) {
+        return;
+      }
+
+      const body = /** @type {Phaser.Physics.Arcade.Body} */ (fighter.body);
+      if (!body) {
+        return;
+      }
+
+      if (opponent) {
+        const facingDirection = opponent.x >= fighter.x ? 1 : -1;
+        fighter.setFacing(facingDirection);
+      }
+
+      let targetVelocity = 0;
+      const canControl = !fighter.isAttacking;
+      if (canControl && input) {
+        const leftActive = !!input.left;
+        const rightActive = !!input.right;
+        if (leftActive && !rightActive) {
+          targetVelocity = -SPEED;
+        } else if (rightActive && !leftActive) {
+          targetVelocity = SPEED;
+        }
+      }
+
+      const acceleration = targetVelocity === 0 ? FRICTION : ACCEL;
+      let vx = body.velocity.x;
+
+      if (targetVelocity > vx) {
+        vx = Math.min(vx + acceleration * dt, targetVelocity);
+      } else if (targetVelocity < vx) {
+        vx = Math.max(vx - acceleration * dt, targetVelocity);
+      }
+
+      vx = Phaser.Math.Clamp(vx, -MAX_VEL, MAX_VEL);
+      if (targetVelocity === 0 && Math.abs(vx) < 1) {
+        vx = 0;
+      }
+
+      body.setVelocityX(vx);
     }
 
     spawnFighters() {
@@ -306,21 +387,22 @@
       return container;
     }
 
-    bindHoldButton(button, stateKey) {
-      if (!button || !this._pointerHoldStates[stateKey]) {
+    bindHoldButton(button, stateKey, player = 'p1') {
+      const pointerStates = this._pointerHoldStates[player];
+      if (!button || !pointerStates || !pointerStates[stateKey]) {
         return;
       }
 
-      const pointerSet = this._pointerHoldStates[stateKey];
+      const pointerSet = pointerStates[stateKey];
       const handlePointerDown = (pointer) => {
         this.preventPointerDefault(pointer);
         pointerSet.add(pointer.id);
-        this.updateDirectionalState(stateKey);
+        this.updateDirectionalState(player, stateKey);
       };
 
       const releasePointer = (pointer) => {
         pointerSet.delete(pointer.id);
-        this.updateDirectionalState(stateKey);
+        this.updateDirectionalState(player, stateKey);
       };
 
       button.on('pointerdown', handlePointerDown);
@@ -390,31 +472,59 @@
       button.buttonBackground.setAlpha(alpha);
     }
 
-    triggerMomentary(stateKey) {
-      this.inputState[stateKey] = true;
-      this._momentaryActions.add(stateKey);
+    triggerMomentary(stateKey, player = 'p1') {
+      const playerState = this.inputState[player];
+      if (!playerState) {
+        return;
+      }
+      playerState[stateKey] = true;
+      this._momentaryActions.add(`${player}:${stateKey}`);
     }
 
     clearMomentaryActions() {
       if (!this._momentaryActions.size) {
         return;
       }
-      this._momentaryActions.forEach((stateKey) => {
-        this.inputState[stateKey] = false;
-        const button = this._touchButtonsByKey[stateKey];
-        if (button && (!this._pointerHoldStates[stateKey] || this._pointerHoldStates[stateKey].size === 0)) {
-          this.setButtonActive(button, false);
+      this._momentaryActions.forEach((entry) => {
+        const [player, stateKey] = entry.split(':');
+        const playerState = this.inputState[player];
+        if (!playerState) {
+          return;
+        }
+        playerState[stateKey] = false;
+        if (player === 'p1') {
+          const button = this._touchButtonsByKey[stateKey];
+          const pointerStates = this._pointerHoldStates[player];
+          const pointerSet = pointerStates ? pointerStates[stateKey] : null;
+          if (button && (!pointerSet || pointerSet.size === 0)) {
+            this.setButtonActive(button, false);
+          }
         }
       });
       this._momentaryActions.clear();
     }
 
-    updateDirectionalState(stateKey) {
-      const pointerActive = this._pointerHoldStates[stateKey] && this._pointerHoldStates[stateKey].size > 0;
-      const keyboardActive = this._keyboardHoldStates[stateKey] || false;
+    updateDirectionalState(playerOrStateKey, maybeStateKey) {
+      let player = 'p1';
+      let stateKey = playerOrStateKey;
+      if (typeof maybeStateKey === 'string') {
+        player = playerOrStateKey;
+        stateKey = maybeStateKey;
+      }
+
+      const pointerStates = this._pointerHoldStates[player];
+      const pointerSet = pointerStates ? pointerStates[stateKey] : null;
+      const pointerActive = pointerSet ? pointerSet.size > 0 : false;
+
+      const keyboardStates = this._keyboardHoldStates[player];
+      const keyboardActive = keyboardStates ? !!keyboardStates[stateKey] : false;
       const isActive = pointerActive || keyboardActive;
-      this.inputState[stateKey] = isActive;
-      this.setButtonActive(this._touchButtonsByKey[stateKey], pointerActive);
+      if (this.inputState[player]) {
+        this.inputState[player][stateKey] = isActive;
+      }
+      if (player === 'p1') {
+        this.setButtonActive(this._touchButtonsByKey[stateKey], pointerActive);
+      }
     }
 
     registerKeyboardControls() {
@@ -424,30 +534,34 @@
 
       const keyboard = this.input.keyboard;
 
-      const onLeftDown = () => {
-        this._keyboardHoldStates.left = true;
-        this.updateDirectionalState('left');
-        this.detectKeyboard();
+      const setDirectionalKeyState = (player, stateKey, isActive) => {
+        const keyboardStates = this._keyboardHoldStates[player];
+        if (!keyboardStates) {
+          return;
+        }
+        keyboardStates[stateKey] = isActive;
+        this.updateDirectionalState(player, stateKey);
+        if (isActive) {
+          this.detectKeyboard();
+        }
       };
-      const onLeftUp = () => {
-        this._keyboardHoldStates.left = false;
-        this.updateDirectionalState('left');
-      };
-      const onRightDown = () => {
-        this._keyboardHoldStates.right = true;
-        this.updateDirectionalState('right');
-        this.detectKeyboard();
-      };
-      const onRightUp = () => {
-        this._keyboardHoldStates.right = false;
-        this.updateDirectionalState('right');
-      };
+
+      const onLeftDown = () => setDirectionalKeyState('p1', 'left', true);
+      const onLeftUp = () => setDirectionalKeyState('p1', 'left', false);
+      const onRightDown = () => setDirectionalKeyState('p1', 'right', true);
+      const onRightUp = () => setDirectionalKeyState('p1', 'right', false);
+
+      const onP2LeftDown = () => setDirectionalKeyState('p2', 'left', true);
+      const onP2LeftUp = () => setDirectionalKeyState('p2', 'left', false);
+      const onP2RightDown = () => setDirectionalKeyState('p2', 'right', true);
+      const onP2RightUp = () => setDirectionalKeyState('p2', 'right', false);
+
       const onPunchDown = () => {
-        this.triggerMomentary('punch');
+        this.triggerMomentary('punch', 'p1');
         this.detectKeyboard();
       };
       const onKickDown = () => {
-        this.triggerMomentary('kick');
+        this.triggerMomentary('kick', 'p1');
         this.detectKeyboard();
       };
       const onAnyKeyDown = () => {
@@ -458,6 +572,10 @@
       keyboard.on('keyup-A', onLeftUp);
       keyboard.on('keydown-D', onRightDown);
       keyboard.on('keyup-D', onRightUp);
+      keyboard.on('keydown-LEFT', onP2LeftDown);
+      keyboard.on('keyup-LEFT', onP2LeftUp);
+      keyboard.on('keydown-RIGHT', onP2RightDown);
+      keyboard.on('keyup-RIGHT', onP2RightUp);
       keyboard.on('keydown-J', onPunchDown);
       keyboard.on('keydown-K', onKickDown);
       keyboard.on('keydown', onAnyKeyDown);
@@ -467,6 +585,10 @@
         keyboard.off('keyup-A', onLeftUp);
         keyboard.off('keydown-D', onRightDown);
         keyboard.off('keyup-D', onRightUp);
+        keyboard.off('keydown-LEFT', onP2LeftDown);
+        keyboard.off('keyup-LEFT', onP2LeftUp);
+        keyboard.off('keydown-RIGHT', onP2RightDown);
+        keyboard.off('keyup-RIGHT', onP2RightUp);
         keyboard.off('keydown-J', onPunchDown);
         keyboard.off('keydown-K', onKickDown);
         keyboard.off('keydown', onAnyKeyDown);
