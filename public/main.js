@@ -39,6 +39,33 @@
       super({ key: 'MainScene' });
       this.dt = 0;
       this._centeredElements = [];
+      this.inputState = {
+        left: false,
+        right: false,
+        punch: false,
+        kick: false,
+      };
+      this._momentaryActions = new Set();
+      this._touchButtonsByKey = {};
+      this._touchButtonMetrics = {
+        width: 96,
+        height: 96,
+        margin: 24,
+        gap: 16,
+      };
+      this._pointerHoldStates = {
+        left: new Set(),
+        right: new Set(),
+      };
+      this._keyboardHoldStates = {
+        left: false,
+        right: false,
+      };
+      const nav = typeof navigator !== 'undefined' ? navigator : null;
+      const hasTouchSupport =
+        (nav && typeof nav.maxTouchPoints === 'number' && nav.maxTouchPoints > 0) ||
+        (typeof window !== 'undefined' && 'ontouchstart' in window);
+      this._keyboardDetected = !hasTouchSupport;
     }
 
     preload() {}
@@ -49,8 +76,25 @@
       centerText(this, 'Stick-Fight', -28, { fontSize: '56px', fontStyle: '700' });
       centerText(this, 'Main Scene Ready', 28, { fontSize: '24px', color: '#bbbbbb' });
 
+      this.registerTouchPrevention();
+      this.createTouchControls();
+      this.registerKeyboardControls();
+
       this.scale.on('resize', this.handleResize, this);
       this.handleResize(this.scale.gameSize);
+
+      const pointerDownHandler = (pointer) => {
+        if (pointer && (pointer.pointerType === 'touch' || pointer.pointerType === 'pen')) {
+          if (this._keyboardDetected) {
+            this._keyboardDetected = false;
+            this.updateTouchControlsVisibility();
+          }
+        }
+      };
+      this.input.on('pointerdown', pointerDownHandler);
+      this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+        this.input.off('pointerdown', pointerDownHandler);
+      });
     }
 
     handleResize(gameSize) {
@@ -60,10 +104,266 @@
       camera.centerOn(width / 2, height / 2);
 
       (this._centeredElements || []).forEach((updatePosition) => updatePosition());
+      this.positionTouchButtons();
     }
 
     update(time, delta) {
       this.dt = Math.min(delta, 50) / 1000;
+      this.clearMomentaryActions();
+    }
+
+    registerTouchPrevention() {
+      const canvas = this.sys.game.canvas;
+      if (canvas) {
+        canvas.style.touchAction = 'none';
+        if (!canvas._preventScrollAttached) {
+          canvas.addEventListener('touchstart', preventDefaultScroll, { passive: false });
+          canvas.addEventListener('touchmove', preventDefaultScroll, { passive: false });
+          canvas._preventScrollAttached = true;
+        }
+      }
+    }
+
+    createTouchControls() {
+      if (this.input) {
+        this.input.addPointer(2);
+      }
+
+      this._touchButtonsByKey.left = this.createTouchButton('◀', { fontSize: '42px' });
+      this._touchButtonsByKey.right = this.createTouchButton('▶', { fontSize: '42px' });
+      this._touchButtonsByKey.punch = this.createTouchButton('Punch', { fontSize: '26px' });
+      this._touchButtonsByKey.kick = this.createTouchButton('Kick', { fontSize: '26px' });
+
+      this.bindHoldButton(this._touchButtonsByKey.left, 'left');
+      this.bindHoldButton(this._touchButtonsByKey.right, 'right');
+      this.bindTapButton(this._touchButtonsByKey.punch, 'punch');
+      this.bindTapButton(this._touchButtonsByKey.kick, 'kick');
+
+      this.positionTouchButtons();
+      this.updateTouchControlsVisibility();
+    }
+
+    createTouchButton(label, textStyleOverrides = {}) {
+      const { width, height } = this._touchButtonMetrics;
+      const container = this.add.container(0, 0);
+      container.setSize(width, height);
+      container.setScrollFactor(0);
+      container.setDepth(1000);
+
+      const background = this.add.rectangle(0, 0, width, height, 0x333333);
+      background.setOrigin(0.5, 0.5);
+      background.setAlpha(0.65);
+      background.setStrokeStyle(2, 0xffffff, 0.25);
+
+      const textStyle = {
+        fontFamily: 'Arial, sans-serif',
+        fontSize: '32px',
+        fontStyle: '700',
+        color: '#ffffff',
+        align: 'center',
+        ...textStyleOverrides,
+      };
+
+      const labelText = this.add.text(0, 0, label, textStyle).setOrigin(0.5, 0.5);
+
+      container.add([background, labelText]);
+      container.buttonBackground = background;
+      container.buttonLabel = labelText;
+      container.baseAlpha = 0.65;
+
+      container.setInteractive(
+        new Phaser.Geom.Rectangle(-width / 2, -height / 2, width, height),
+        Phaser.Geom.Rectangle.Contains
+      );
+
+      return container;
+    }
+
+    bindHoldButton(button, stateKey) {
+      if (!button || !this._pointerHoldStates[stateKey]) {
+        return;
+      }
+
+      const pointerSet = this._pointerHoldStates[stateKey];
+      const handlePointerDown = (pointer) => {
+        this.preventPointerDefault(pointer);
+        pointerSet.add(pointer.id);
+        this.updateDirectionalState(stateKey);
+      };
+
+      const releasePointer = (pointer) => {
+        pointerSet.delete(pointer.id);
+        this.updateDirectionalState(stateKey);
+      };
+
+      button.on('pointerdown', handlePointerDown);
+      button.on('pointerup', releasePointer);
+      button.on('pointerupoutside', releasePointer);
+      button.on('pointerout', (pointer) => {
+        if (!pointer.isDown) {
+          releasePointer(pointer);
+        }
+      });
+    }
+
+    bindTapButton(button, stateKey) {
+      if (!button) {
+        return;
+      }
+
+      const handlePointerDown = (pointer) => {
+        this.preventPointerDefault(pointer);
+        this.triggerMomentary(stateKey);
+        this.setButtonActive(button, true);
+      };
+
+      const clearHighlight = () => {
+        this.setButtonActive(button, false);
+      };
+
+      button.on('pointerdown', handlePointerDown);
+      button.on('pointerup', clearHighlight);
+      button.on('pointerupoutside', clearHighlight);
+      button.on('pointerout', (pointer) => {
+        if (!pointer.isDown) {
+          clearHighlight();
+        }
+      });
+    }
+
+    preventPointerDefault(pointer) {
+      if (pointer && pointer.event && pointer.event.cancelable !== false) {
+        pointer.event.preventDefault();
+      }
+    }
+
+    positionTouchButtons() {
+      const buttons = this._touchButtonsByKey;
+      if (!buttons.left || !buttons.right || !buttons.punch || !buttons.kick) {
+        return;
+      }
+
+      const { width, height } = this.scale.gameSize;
+      const { width: buttonWidth, height: buttonHeight, margin, gap } = this._touchButtonMetrics;
+      const baseY = height - margin - buttonHeight / 2;
+
+      buttons.left.setPosition(margin + buttonWidth / 2, baseY);
+      buttons.right.setPosition(margin + buttonWidth / 2 + buttonWidth + gap, baseY);
+
+      const rightBaseX = width - margin - buttonWidth / 2;
+      buttons.kick.setPosition(rightBaseX, baseY);
+      buttons.punch.setPosition(rightBaseX - (buttonWidth + gap), baseY);
+    }
+
+    setButtonActive(button, isActive) {
+      if (!button || !button.buttonBackground) {
+        return;
+      }
+      const alpha = isActive ? 0.9 : button.baseAlpha || 0.65;
+      button.buttonBackground.setAlpha(alpha);
+    }
+
+    triggerMomentary(stateKey) {
+      this.inputState[stateKey] = true;
+      this._momentaryActions.add(stateKey);
+    }
+
+    clearMomentaryActions() {
+      if (!this._momentaryActions.size) {
+        return;
+      }
+      this._momentaryActions.forEach((stateKey) => {
+        this.inputState[stateKey] = false;
+        const button = this._touchButtonsByKey[stateKey];
+        if (button && (!this._pointerHoldStates[stateKey] || this._pointerHoldStates[stateKey].size === 0)) {
+          this.setButtonActive(button, false);
+        }
+      });
+      this._momentaryActions.clear();
+    }
+
+    updateDirectionalState(stateKey) {
+      const pointerActive = this._pointerHoldStates[stateKey] && this._pointerHoldStates[stateKey].size > 0;
+      const keyboardActive = this._keyboardHoldStates[stateKey] || false;
+      const isActive = pointerActive || keyboardActive;
+      this.inputState[stateKey] = isActive;
+      this.setButtonActive(this._touchButtonsByKey[stateKey], pointerActive);
+    }
+
+    registerKeyboardControls() {
+      if (!this.input || !this.input.keyboard) {
+        return;
+      }
+
+      const keyboard = this.input.keyboard;
+
+      const onLeftDown = () => {
+        this._keyboardHoldStates.left = true;
+        this.updateDirectionalState('left');
+        this.detectKeyboard();
+      };
+      const onLeftUp = () => {
+        this._keyboardHoldStates.left = false;
+        this.updateDirectionalState('left');
+      };
+      const onRightDown = () => {
+        this._keyboardHoldStates.right = true;
+        this.updateDirectionalState('right');
+        this.detectKeyboard();
+      };
+      const onRightUp = () => {
+        this._keyboardHoldStates.right = false;
+        this.updateDirectionalState('right');
+      };
+      const onPunchDown = () => {
+        this.triggerMomentary('punch');
+        this.detectKeyboard();
+      };
+      const onKickDown = () => {
+        this.triggerMomentary('kick');
+        this.detectKeyboard();
+      };
+      const onAnyKeyDown = () => {
+        this.detectKeyboard();
+      };
+
+      keyboard.on('keydown-A', onLeftDown);
+      keyboard.on('keyup-A', onLeftUp);
+      keyboard.on('keydown-D', onRightDown);
+      keyboard.on('keyup-D', onRightUp);
+      keyboard.on('keydown-J', onPunchDown);
+      keyboard.on('keydown-K', onKickDown);
+      keyboard.on('keydown', onAnyKeyDown);
+
+      this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+        keyboard.off('keydown-A', onLeftDown);
+        keyboard.off('keyup-A', onLeftUp);
+        keyboard.off('keydown-D', onRightDown);
+        keyboard.off('keyup-D', onRightUp);
+        keyboard.off('keydown-J', onPunchDown);
+        keyboard.off('keydown-K', onKickDown);
+        keyboard.off('keydown', onAnyKeyDown);
+      });
+    }
+
+    detectKeyboard() {
+      if (this._keyboardDetected) {
+        return;
+      }
+      this._keyboardDetected = true;
+      this.updateTouchControlsVisibility();
+    }
+
+    updateTouchControlsVisibility() {
+      const visible = !this._keyboardDetected;
+      Object.values(this._touchButtonsByKey).forEach((button) => {
+        if (button) {
+          if (!visible) {
+            this.setButtonActive(button, false);
+          }
+          button.setVisible(visible);
+        }
+      });
     }
   }
 
