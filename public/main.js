@@ -3,6 +3,10 @@
   const ACCEL = 1200;
   const FRICTION = 1600;
   const MAX_VEL = 240;
+  const MIN_LAYOUT_WIDTH = 320;
+  const MIN_LAYOUT_HEIGHT = 180;
+  const LAYOUT_POLL_INTERVAL = 16;
+  const LAYOUT_POLL_TIMEOUT = 500;
 
   const preventDefaultScroll = (event) => {
     if (event.touches && event.touches.length > 1) {
@@ -22,7 +26,12 @@
       ...style,
     };
 
-    const text = scene.add.text(0, 0, content, textStyle).setOrigin(0.5, 0.5);
+    const text = scene.add
+      .text(0, 0, content, textStyle)
+      .setOrigin(0.5, 0.5)
+      .setDepth(20)
+      .setAlpha(1)
+      .setVisible(true);
 
     const updatePosition = () => {
       const { width, height } = scene.scale.gameSize;
@@ -44,6 +53,9 @@
       super(scene, x, y);
 
       scene.add.existing(this);
+      this.setDepth(10);
+      this.setAlpha(1);
+      this.setVisible(true);
 
       const color = config.color ?? 0xffffff;
       const lineWidth = config.lineWidth ?? 4;
@@ -66,7 +78,17 @@
       const legRight = scene.add.line(0, 12, 0, 12, 10, 28, color, 1);
       legRight.setLineWidth(lineWidth, lineWidth);
 
-      this.add([legLeft, legRight, torso, armLeft, armRight, head]);
+      const parts = [legLeft, legRight, torso, armLeft, armRight, head];
+      parts.forEach((part) => {
+        if (part && typeof part.setAlpha === 'function') {
+          part.setAlpha(1);
+        }
+        if (part && typeof part.setVisible === 'function') {
+          part.setVisible(true);
+        }
+      });
+
+      this.add(parts);
 
       this.setSize(28, 64);
 
@@ -107,6 +129,9 @@
       }
 
       const bounds = this.scene.physics.world.bounds;
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+        return;
+      }
       const halfWidth = body.width / 2;
       const halfHeight = body.height / 2;
 
@@ -157,6 +182,10 @@
       this.safeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
       this.debugOverlayVisible = false;
       this.debugText = null;
+      this._layoutReady = false;
+      this._layoutReadyLogPrinted = false;
+      this._resizeDebounceEvent = null;
+      this._pendingResizeSize = null;
     }
 
     preload() {}
@@ -182,7 +211,7 @@
       this.scale.on('resize', this.handleResize, this);
       this.handleResize(this.scale.gameSize);
 
-      this.spawnFighters();
+      this.waitForValidSize(() => this.initWorldAndSpawn());
 
       const pointerDownHandler = (pointer) => {
         if (pointer && (pointer.pointerType === 'touch' || pointer.pointerType === 'pen')) {
@@ -198,11 +227,201 @@
       });
     }
 
+    waitForValidSize(callback) {
+      const start =
+        typeof performance !== 'undefined' && typeof performance.now === 'function'
+          ? performance.now()
+          : Date.now();
+
+      const checkSize = () => {
+        const size = this.scale ? this.scale.gameSize : null;
+        const width = size ? size.width : 0;
+        const height = size ? size.height : 0;
+
+        if (width >= MIN_LAYOUT_WIDTH && height >= MIN_LAYOUT_HEIGHT) {
+          if (!this._layoutReadyLogPrinted) {
+            console.info(
+              `[StickFight] layout ready: ${Math.round(width)}x${Math.round(height)}`
+            );
+            this._layoutReadyLogPrinted = true;
+          }
+          if (typeof callback === 'function') {
+            callback();
+          }
+          return;
+        }
+
+        const now =
+          typeof performance !== 'undefined' && typeof performance.now === 'function'
+            ? performance.now()
+            : Date.now();
+
+        if (now - start >= LAYOUT_POLL_TIMEOUT) {
+          if (!this._layoutReadyLogPrinted) {
+            const reportedWidth = Math.round(width || 0);
+            const reportedHeight = Math.round(height || 0);
+            console.warn(
+              `[StickFight] layout timeout after ${LAYOUT_POLL_TIMEOUT}ms (size: ${reportedWidth}x${reportedHeight})`
+            );
+            this._layoutReadyLogPrinted = true;
+          }
+          if (typeof callback === 'function') {
+            callback();
+          }
+          return;
+        }
+
+        if (this.time && typeof this.time.delayedCall === 'function') {
+          this.time.delayedCall(LAYOUT_POLL_INTERVAL, checkSize);
+        } else if (
+          typeof window !== 'undefined' &&
+          typeof window.requestAnimationFrame === 'function'
+        ) {
+          window.requestAnimationFrame(checkSize);
+        } else {
+          setTimeout(checkSize, LAYOUT_POLL_INTERVAL);
+        }
+      };
+
+      checkSize();
+    }
+
+    initWorldAndSpawn() {
+      if (!this.physics || !this.physics.world) {
+        return;
+      }
+
+      if (!this._layoutReady) {
+        this._layoutReady = true;
+      }
+
+      const scaleSize = this.scale ? this.scale.gameSize : null;
+      const pending = this._pendingResizeSize;
+      const size =
+        pending && pending.width >= MIN_LAYOUT_WIDTH && pending.height >= MIN_LAYOUT_HEIGHT
+          ? pending
+          : scaleSize;
+
+      const fallbackScaleSize = this.scale ? this.scale.gameSize : null;
+      const resolvedSource = size || fallbackScaleSize;
+      const resolvedSize = resolvedSource
+        ? { width: resolvedSource.width || 0, height: resolvedSource.height || 0 }
+        : null;
+
+      this.refreshWorldBounds(resolvedSize);
+
+      if (!this._fighters || this._fighters.length === 0) {
+        this.spawnFighters();
+      }
+
+      this.clampFightersToWorld();
+      this.applyResize(resolvedSize);
+      this._pendingResizeSize = resolvedSize;
+    }
+
+    refreshWorldBounds(gameSize) {
+      if (!this.physics || !this.physics.world) {
+        return;
+      }
+      const size = gameSize || this.scale.gameSize;
+      if (!size) {
+        return;
+      }
+      const width = Math.max(typeof size.width === 'number' ? size.width : 0, MIN_LAYOUT_WIDTH);
+      const height = Math.max(
+        typeof size.height === 'number' ? size.height : 0,
+        MIN_LAYOUT_HEIGHT
+      );
+      this.physics.world.setBounds(0, 0, width, height);
+    }
+
+    clampFightersToWorld() {
+      if (!this._fighters || !this.physics || !this.physics.world) {
+        return;
+      }
+      const bounds = this.physics.world.bounds;
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+        return;
+      }
+
+      this._fighters.forEach((fighter) => {
+        if (!fighter) {
+          return;
+        }
+        const body = /** @type {Phaser.Physics.Arcade.Body} */ (fighter.body);
+        if (!body) {
+          return;
+        }
+
+        const halfWidth = body.width / 2;
+        const halfHeight = body.height / 2;
+        const minX = bounds.x + halfWidth;
+        const maxX = bounds.right - halfWidth;
+        const minY = bounds.y + halfHeight;
+        const maxY = bounds.bottom - halfHeight;
+
+        const clampedX = Phaser.Math.Clamp(fighter.x, minX, maxX);
+        const clampedY = Phaser.Math.Clamp(fighter.y, minY, maxY);
+
+        if (clampedX !== fighter.x) {
+          fighter.setX(clampedX);
+          body.setVelocityX(0);
+        }
+
+        if (clampedY !== fighter.y) {
+          fighter.setY(clampedY);
+          body.setVelocityY(0);
+        }
+
+        fighter.setAlpha(1);
+        fighter.setVisible(true);
+      });
+    }
+
     handleResize(gameSize) {
-      const { width, height } = gameSize || this.scale.gameSize;
+      const sourceSize = gameSize || this.scale.gameSize;
+      if (!sourceSize) {
+        return;
+      }
+
+      this._pendingResizeSize = {
+        width: sourceSize.width,
+        height: sourceSize.height,
+      };
+
+      const runResize = () => {
+        this._resizeDebounceEvent = null;
+        const pending = this._pendingResizeSize || this.scale.gameSize;
+        this.applyResize(pending);
+      };
+
+      if (!this.time || typeof this.time.delayedCall !== 'function') {
+        runResize();
+        return;
+      }
+
+      if (this._resizeDebounceEvent) {
+        this._resizeDebounceEvent.remove(false);
+      }
+
+      this._resizeDebounceEvent = this.time.delayedCall(0, runResize);
+    }
+
+    applyResize(gameSize) {
+      const size = gameSize || this.scale.gameSize;
+      if (!size) {
+        return;
+      }
+      const width = typeof size.width === 'number' ? size.width : this.scale.gameSize.width;
+      const height = typeof size.height === 'number' ? size.height : this.scale.gameSize.height;
+      const safeWidth = Math.max(width || 0, 1);
+      const safeHeight = Math.max(height || 0, 1);
+
       const camera = this.cameras.main;
-      camera.setViewport(0, 0, width, height);
-      camera.centerOn(width / 2, height / 2);
+      if (camera) {
+        camera.setViewport(0, 0, safeWidth, safeHeight);
+        camera.centerOn(safeWidth / 2, safeHeight / 2);
+      }
 
       this.updateSafeAreaInsets();
 
@@ -210,12 +429,9 @@
       this.positionTouchButtons();
       this.positionDebugOverlay();
 
-      if (this.physics && this.physics.world) {
-        this.physics.world.setBounds(0, 0, width, height);
-      }
-
-      if (this._fighters) {
-        this._fighters.forEach((fighter) => fighter.update());
+      if (this._layoutReady) {
+        this.refreshWorldBounds(size);
+        this.clampFightersToWorld();
       }
     }
 
@@ -287,26 +503,44 @@
         return;
       }
 
+      if (!this._fighters) {
+        this._fighters = [];
+      }
+      if (this._fighters.length) {
+        return;
+      }
+
       const bounds = this.physics.world.bounds;
-      const paddingX = 160;
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+        return;
+      }
+
       const safeHalfWidth = 14;
       const safeHalfHeight = 32;
+      const groundOffset = Math.max(64, safeHalfHeight + 16);
 
-      const minX = bounds.x + safeHalfWidth;
-      const maxX = bounds.right - safeHalfWidth;
-      const minY = bounds.y + safeHalfHeight;
-      const maxY = bounds.bottom - safeHalfHeight;
+      const spawnY = Phaser.Math.Clamp(
+        bounds.bottom - groundOffset,
+        bounds.y + safeHalfHeight,
+        bounds.bottom - safeHalfHeight
+      );
 
-      const p1X = Phaser.Math.Clamp(bounds.x + paddingX, minX, maxX);
-      const p2X = Phaser.Math.Clamp(bounds.right - paddingX, minX, maxX);
-      const centerY = bounds.y + bounds.height / 2;
-      const startY = Phaser.Math.Clamp(centerY, minY, maxY);
+      const spawnX1 = Phaser.Math.Clamp(
+        bounds.x + bounds.width * 0.22,
+        bounds.x + safeHalfWidth,
+        bounds.right - safeHalfWidth
+      );
+      const spawnX2 = Phaser.Math.Clamp(
+        bounds.x + bounds.width * 0.78,
+        bounds.x + safeHalfWidth,
+        bounds.right - safeHalfWidth
+      );
 
-      const p1 = new Stick(this, p1X, startY, { facing: 1, color: 0x4cd964 });
-      const p2 = new Stick(this, p2X, startY, { facing: -1, color: 0xff3b30 });
+      const p1 = new Stick(this, spawnX1, spawnY, { facing: 1, color: 0x4cd964 });
+      const p2 = new Stick(this, spawnX2, spawnY, { facing: -1, color: 0xff3b30 });
 
-      p1.setFacing(1);
-      p2.setFacing(-1);
+      p1.setFacing(1).setAlpha(1).setVisible(true);
+      p2.setFacing(-1).setAlpha(1).setVisible(true);
 
       this._fighters = [p1, p2];
     }
@@ -364,7 +598,8 @@
         })
         .setOrigin(0.5, 0);
       text.setScrollFactor(0);
-      text.setDepth(1500);
+      text.setDepth(20);
+      text.setAlpha(1);
       text.setVisible(false);
       this.debugText = text;
       this.positionDebugOverlay();
@@ -452,7 +687,7 @@
       const container = this.add.container(0, 0);
       container.setSize(size, size);
       container.setScrollFactor(0);
-      container.setDepth(1000);
+      container.setDepth(30);
 
       const background = this.add.rectangle(0, 0, size, size, 0x333333);
       background.setOrigin(0.5, 0.5);
@@ -750,8 +985,20 @@
     }
   }
 
+  const determineRendererType = () => {
+    if (typeof window === 'undefined' || !window.location) {
+      return Phaser.AUTO;
+    }
+    try {
+      const params = new URLSearchParams(window.location.search || '');
+      return params.get('forceCanvas') === '1' ? Phaser.CANVAS : Phaser.AUTO;
+    } catch (error) {
+      return Phaser.AUTO;
+    }
+  };
+
   const config = {
-    type: Phaser.AUTO,
+    type: determineRendererType(),
     parent: 'game-root',
     backgroundColor: '#111',
     physics: {
