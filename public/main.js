@@ -34,6 +34,91 @@
     return text;
   };
 
+  class Stick extends Phaser.GameObjects.Container {
+    constructor(scene, x, y, config = {}) {
+      super(scene, x, y);
+
+      scene.add.existing(this);
+
+      const color = config.color ?? 0xffffff;
+      const lineWidth = config.lineWidth ?? 4;
+
+      const head = scene.add.circle(0, -20, 10, color, 1);
+      head.setStrokeStyle(2, color, 1);
+
+      const torso = scene.add.line(0, 0, 0, -10, 0, 12, color, 1);
+      torso.setLineWidth(lineWidth, lineWidth);
+
+      const armLeft = scene.add.line(0, -4, 0, -4, -14, 4, color, 1);
+      armLeft.setLineWidth(lineWidth, lineWidth);
+
+      const armRight = scene.add.line(0, -4, 0, -4, 14, 4, color, 1);
+      armRight.setLineWidth(lineWidth, lineWidth);
+
+      const legLeft = scene.add.line(0, 12, 0, 12, -10, 28, color, 1);
+      legLeft.setLineWidth(lineWidth, lineWidth);
+
+      const legRight = scene.add.line(0, 12, 0, 12, 10, 28, color, 1);
+      legRight.setLineWidth(lineWidth, lineWidth);
+
+      this.add([legLeft, legRight, torso, armLeft, armRight, head]);
+
+      this.setSize(28, 64);
+
+      this.hp = 100;
+      this.facing = config.facing === -1 ? -1 : 1;
+
+      scene.physics.add.existing(this);
+      const body = /** @type {Phaser.Physics.Arcade.Body} */ (this.body);
+      body.setAllowGravity(false);
+      body.setCollideWorldBounds(true);
+      body.setSize(28, 64, true);
+
+      this.setScale(this.facing, 1);
+    }
+
+    setFacing(direction) {
+      const dir = direction >= 0 ? 1 : -1;
+      if (dir !== this.facing) {
+        this.facing = dir;
+        this.setScale(dir, 1);
+      }
+      return this;
+    }
+
+    setX(x) {
+      return super.setX(x);
+    }
+
+    setY(y) {
+      return super.setY(y);
+    }
+
+    update() {
+      const body = /** @type {Phaser.Physics.Arcade.Body} */ (this.body);
+      if (!body) {
+        return;
+      }
+
+      const bounds = this.scene.physics.world.bounds;
+      const halfWidth = body.width / 2;
+      const halfHeight = body.height / 2;
+
+      const clampedX = Phaser.Math.Clamp(this.x, bounds.x + halfWidth, bounds.right - halfWidth);
+      const clampedY = Phaser.Math.Clamp(this.y, bounds.y + halfHeight, bounds.bottom - halfHeight);
+
+      if (clampedX !== this.x) {
+        super.setX(clampedX);
+        body.setVelocityX(0);
+      }
+
+      if (clampedY !== this.y) {
+        super.setY(clampedY);
+        body.setVelocityY(0);
+      }
+    }
+  }
+
   class MainScene extends Phaser.Scene {
     constructor() {
       super({ key: 'MainScene' });
@@ -66,6 +151,7 @@
         (nav && typeof nav.maxTouchPoints === 'number' && nav.maxTouchPoints > 0) ||
         (typeof window !== 'undefined' && 'ontouchstart' in window);
       this._keyboardDetected = !hasTouchSupport;
+      this._fighters = [];
     }
 
     preload() {}
@@ -82,6 +168,8 @@
 
       this.scale.on('resize', this.handleResize, this);
       this.handleResize(this.scale.gameSize);
+
+      this.spawnFighters();
 
       const pointerDownHandler = (pointer) => {
         if (pointer && (pointer.pointerType === 'touch' || pointer.pointerType === 'pen')) {
@@ -105,11 +193,50 @@
 
       (this._centeredElements || []).forEach((updatePosition) => updatePosition());
       this.positionTouchButtons();
+
+      if (this.physics && this.physics.world) {
+        this.physics.world.setBounds(0, 0, width, height);
+      }
+
+      if (this._fighters) {
+        this._fighters.forEach((fighter) => fighter.update());
+      }
     }
 
     update(time, delta) {
       this.dt = Math.min(delta, 50) / 1000;
       this.clearMomentaryActions();
+
+      this._fighters.forEach((fighter) => fighter.update(this.dt));
+    }
+
+    spawnFighters() {
+      if (!this.physics || !this.physics.world) {
+        return;
+      }
+
+      const bounds = this.physics.world.bounds;
+      const paddingX = 160;
+      const safeHalfWidth = 14;
+      const safeHalfHeight = 32;
+
+      const minX = bounds.x + safeHalfWidth;
+      const maxX = bounds.right - safeHalfWidth;
+      const minY = bounds.y + safeHalfHeight;
+      const maxY = bounds.bottom - safeHalfHeight;
+
+      const p1X = Phaser.Math.Clamp(bounds.x + paddingX, minX, maxX);
+      const p2X = Phaser.Math.Clamp(bounds.right - paddingX, minX, maxX);
+      const centerY = bounds.y + bounds.height / 2;
+      const startY = Phaser.Math.Clamp(centerY, minY, maxY);
+
+      const p1 = new Stick(this, p1X, startY, { facing: 1, color: 0x4cd964 });
+      const p2 = new Stick(this, p2X, startY, { facing: -1, color: 0xff3b30 });
+
+      p1.setFacing(1);
+      p2.setFacing(-1);
+
+      this._fighters = [p1, p2];
     }
 
     registerTouchPrevention() {
