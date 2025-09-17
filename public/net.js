@@ -49,6 +49,7 @@
     panel: null,
     isAdmin: false,
     claims: null,
+    adminOverride: false,
   };
 
   const lobbyRoomsState = {
@@ -232,6 +233,14 @@ function ensureAuthReady() {
   const ensureAdminPrivileges = async (options) => {
     const opts = options || {};
     const forceRefresh = !!opts.forceRefresh;
+    const overrideActive = overlayState.adminOverride && !!bootFlags && !!bootFlags.debug;
+    if (overrideActive) {
+      const { auth, user } = await ensureSignedInUser();
+      const currentUser = user || (auth && auth.currentUser) || null;
+      logMessage('[ADMIN]', 'override-active (dev use only)');
+      logMessage('[ADMIN]', 'entered');
+      return { auth, user: currentUser, claims: overlayState.claims || {} };
+    }
     if (_adminCheckPromise && !forceRefresh) {
       try {
         const result = await _adminCheckPromise;
@@ -740,12 +749,18 @@ function ensureAuthReady() {
     const code = promptFn ? promptFn('Enter admin code') : null;
     if (code === '808080') {
       try {
+        overlayState.adminOverride = true;
         await ensureAdminPrivileges({ forceRefresh: true });
         overlayState.isAdmin = true;
-        logMessage('[ADMIN]', 'entered');
+        const overrideAllowed = !!bootFlags && !!bootFlags.debug;
+        overlayState.adminOverride = overrideAllowed;
+        if (!overrideAllowed) {
+          logMessage('[ADMIN]', 'entered');
+        }
         renderAdminPanel();
       } catch (error) {
         overlayState.isAdmin = false;
+        overlayState.adminOverride = false;
         const message = error && error.message ? error.message : 'Failed to verify admin access.';
         logMessage('[ADMIN]', 'entry-denied', error);
         if (alertFn) {
