@@ -1,0 +1,14 @@
+// One-player-per-device per uid per room
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    match /rooms/{roomId}/players/{uid} {
+      allow read: if true;
+      allow create, update: if request.auth != null
+        && request.auth.uid == uid
+        && (!exists(/databases/$(db)/documents/rooms/$(roomId)/players/$(uid))
+            || request.resource.data.deviceId == resource.data.deviceId);
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}

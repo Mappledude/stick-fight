@@ -1,0 +1,23 @@
+.controls-root{position:fixed;inset:0;pointer-events:none;}
+.joy-wrap{
+  position:fixed; bottom:calc(env(safe-area-inset-bottom) + 12px);
+  left:calc(env(safe-area-inset-left) + 12px);
+  width:min(max(120px,22vw),220px); height:min(max(120px,22vw),220px);
+  border-radius:50%; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.15);
+  pointer-events:auto; touch-action:none;
+}
+.joy-knob{
+  position:absolute; left:50%; top:50%; width:40%; height:40%;
+  transform:translate(-50%,-50%); border-radius:50%;
+  background:rgba(255,255,255,.25); border:1px solid rgba(255,255,255,.2);
+}
+.btn-wrap{
+  position:fixed; bottom:calc(env(safe-area-inset-bottom) + 12px);
+  right:calc(env(safe-area-inset-right) + 12px); display:flex; gap:2vw;
+  pointer-events:auto;
+}
+.btn{
+  width:min(max(64px,14vw),120px); height:min(max(64px,14vw),120px);
+  border-radius:14px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.2);
+  color:#fff; font:600 14px/1.2 system-ui; text-transform:uppercase;
+}
