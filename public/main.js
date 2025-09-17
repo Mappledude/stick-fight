@@ -948,15 +948,18 @@
 
       this.logRendererOverride();
 
-      this.titleText = centerText(this, 'Stick-Fight', -28, { fontSize: '56px', fontStyle: '700' });
-      if (this.titleText && this.titleText.setInteractive) {
-        this.titleText.setInteractive({ useHandCursor: false });
-        this.titleText.on('pointerdown', (pointer) => {
-          this.preventPointerDefault(pointer);
-          this.toggleDebugOverlay();
-        });
+      const skipCenterText = this.diagnosticsActive() && this._joyDiagModes.joystickOnly;
+      if (!skipCenterText) {
+        this.titleText = centerText(this, 'Stick-Fight', -28, { fontSize: '56px', fontStyle: '700' });
+        if (this.titleText && this.titleText.setInteractive) {
+          this.titleText.setInteractive({ useHandCursor: false });
+          this.titleText.on('pointerdown', (pointer) => {
+            this.preventPointerDefault(pointer);
+            this.toggleDebugOverlay();
+          });
+        }
+        centerText(this, 'Main Scene Ready', 28, { fontSize: '24px', color: '#bbbbbb' });
       }
-      centerText(this, 'Main Scene Ready', 28, { fontSize: '24px', color: '#bbbbbb' });
 
       this.registerTouchPrevention();
       this.createTouchControls();
@@ -1609,6 +1612,57 @@
 
       this.positionTouchButtons();
       this.updateTouchControlsVisibility();
+
+      if (joystickOnly) {
+        this.hideLegacyTouchContainers();
+      }
+    }
+
+    hideLegacyTouchContainers() {
+      const hideLegacyDirectionalControl = (control) => {
+        if (!control) {
+          return;
+        }
+        const hideSingle = (item) => {
+          if (!item) {
+            return;
+          }
+          if (typeof item.setVisible === 'function') {
+            item.setVisible(false);
+          }
+          if (typeof item.setActive === 'function') {
+            item.setActive(false);
+          }
+          if (item.input) {
+            item.input.enabled = false;
+          }
+        };
+        if (Array.isArray(control)) {
+          control.forEach(hideSingle);
+          return;
+        }
+        hideSingle(control);
+        if (typeof control === 'object') {
+          hideLegacyDirectionalControl(control.left);
+          hideLegacyDirectionalControl(control.right);
+          hideLegacyDirectionalControl(control.up);
+          hideLegacyDirectionalControl(control.down);
+          if (control.container && control.container !== control) {
+            hideLegacyDirectionalControl(control.container);
+          }
+        }
+      };
+      [
+        this.legacyTouchControls,
+        this.legacyTouchButtons,
+        this.legacyDPad,
+        this.legacyDpad,
+        this.legacyDpadButtons,
+        this.dpad,
+        this.dpadContainer,
+        this.arrowControls,
+        this.arrowButtons,
+      ].forEach(hideLegacyDirectionalControl);
     }
 
     createTouchButton(label, textStyleOverrides = {}) {
@@ -1993,51 +2047,8 @@
         joystick.setVisible(visible);
         joystick.setControlEnabled(visible);
       });
-      if (visible) {
-        const hideLegacyDirectionalControl = (control) => {
-          if (!control) {
-            return;
-          }
-          const hideSingle = (item) => {
-            if (!item) {
-              return;
-            }
-            if (typeof item.setVisible === 'function') {
-              item.setVisible(false);
-            }
-            if (typeof item.setActive === 'function') {
-              item.setActive(false);
-            }
-            if (item.input) {
-              item.input.enabled = false;
-            }
-          };
-          if (Array.isArray(control)) {
-            control.forEach(hideSingle);
-            return;
-          }
-          hideSingle(control);
-          if (typeof control === 'object') {
-            hideLegacyDirectionalControl(control.left);
-            hideLegacyDirectionalControl(control.right);
-            hideLegacyDirectionalControl(control.up);
-            hideLegacyDirectionalControl(control.down);
-            if (control.container && control.container !== control) {
-              hideLegacyDirectionalControl(control.container);
-            }
-          }
-        };
-        [
-          this.legacyTouchControls,
-          this.legacyTouchButtons,
-          this.legacyDPad,
-          this.legacyDpad,
-          this.legacyDpadButtons,
-          this.dpad,
-          this.dpadContainer,
-          this.arrowControls,
-          this.arrowButtons,
-        ].forEach(hideLegacyDirectionalControl);
+      if (visible || (this.diagnosticsActive() && this._joyDiagModes.joystickOnly)) {
+        this.hideLegacyTouchContainers();
       }
     }
 
