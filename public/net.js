@@ -5,6 +5,7 @@
     initialized: false,
     firestore: null,
     fieldValue: null,
+    auth: null,
     roomId: null,
     peerId: null,
     isHost: false,
@@ -33,10 +34,7 @@
     return null;
   };
 
-  const ensureFirestore = () => {
-    if (netState.firestore) {
-      return netState.firestore;
-    }
+  const ensureFirebaseApp = () => {
     const firebase = firebaseNamespace();
     if (!firebase) {
       throw new Error('Firebase SDK failed to load.');
@@ -48,6 +46,14 @@
     if (!firebase.apps || firebase.apps.length === 0) {
       firebase.initializeApp(config);
     }
+    return firebase;
+  };
+
+  const ensureFirestore = () => {
+    if (netState.firestore) {
+      return netState.firestore;
+    }
+    const firebase = ensureFirebaseApp();
     if (typeof firebase.firestore !== 'function') {
       throw new Error('Firestore SDK is not available.');
     }
@@ -57,44 +63,78 @@
     return firestoreInstance;
   };
 
-  const ensureAuthReady = (() => {
-    let authPromise = null;
+// --- Auth bootstrap (namespaced Firebase v8 style) ---------------------------
+let _authInstance = null;
+let _signInPromise = null;
 
-    const ensure = async () => {
-      const firebase = firebaseNamespace();
-      if (!firebase || typeof firebase.auth !== 'function') {
-        return;
-      }
+/** Return the firebase.auth() singleton, initializing Firebase app if needed. */
+function ensureAuth() {
+  if (_authInstance) return _authInstance;
 
-      const auth = firebase.auth();
-      if (!auth) {
-        return;
-      }
+  const firebase = ensureFirebaseApp
+    ? ensureFirebaseApp()                   // your existing helper
+    : (window.firebase || firebaseNamespace && firebaseNamespace());
 
-      if (auth.currentUser) {
-        return;
-      }
+  if (!firebase || typeof firebase.auth !== 'function') {
+    throw new Error('Firebase Auth SDK is not available.');
+  }
 
-      if (!authPromise) {
-        if (typeof auth.signInAnonymously !== 'function') {
-          throw new Error('Firebase Auth does not support anonymous sign-in.');
-        }
-        authPromise = auth
-          .signInAnonymously()
-          .catch((error) => {
-            authPromise = null;
-            throw error;
-          })
-          .then(() => {
-            authPromise = null;
-          });
-      }
+  _authInstance = firebase.auth();
+  return _authInstance;
+}
 
-      return authPromise;
-    };
+/**
+ * Ensure there is a signed-in user (anonymous).
+ * - De-dupes concurrent calls via a shared promise.
+ * - Resolves with { auth, user }.
+ */
+async function ensureSignedInUser() {
+  const auth = ensureAuth();
 
-    return () => ensure();
-  })();
+  // Already signed in?
+  if (auth.currentUser) {
+    return { auth, user: auth.currentUser };
+  }
+
+  // Another call is already signing in? await it.
+  if (_signInPromise) {
+    await _signInPromise;
+    if (!auth.currentUser) {
+      throw new Error('Anonymous sign-in finished but no currentUser present.');
+    }
+    return { auth, user: auth.currentUser };
+  }
+
+  // Start a new anonymous sign-in, memoized.
+  if (typeof auth.signInAnonymously !== 'function') {
+    throw new Error('Firebase Auth does not support anonymous sign-in.');
+  }
+
+  _signInPromise = auth.signInAnonymously()
+    .catch((err) => {
+      // Clear so future attempts can retry.
+      _signInPromise = null;
+      throw err;
+    })
+    .then((cred) => {
+      _signInPromise = null;
+      const user = (cred && cred.user) || auth.currentUser;
+      if (!user) throw new Error('Failed to sign in anonymously.');
+      return user;
+    });
+
+  const user = await _signInPromise;
+  return { auth, user };
+}
+
+/** Optional: legacy/compat alias for callers expecting a “ready” function. */
+function ensureAuthReady() {
+  return ensureSignedInUser().then(() => undefined);
+}
+
+// Exports (adjust to your module system)
+export { ensureAuth, ensureSignedInUser, ensureAuthReady };
+
 
   const getTimestampValue = () => {
     const firebase = firebaseNamespace();
@@ -188,13 +228,18 @@
   const createRoom = async (options) => {
     await ensureAuthReady();
     const firestore = ensureFirestore();
+    const { auth, user } = await ensureSignedInUser();
+    const currentUser = user || (auth && auth.currentUser);
+    if (!currentUser || !currentUser.uid) {
+      throw new Error('Unable to determine the authenticated user.');
+    }
     const hostName = typeof options === 'string' ? options : options && options.name;
     const resolvedHostName = hostName && hostName.trim() ? hostName.trim() : 'Host';
     const roomId = generateRoomId();
     const hostPeerId = generatePeerId();
     const roomsCollection = firestore.collection('rooms');
     const roomRef = roomsCollection.doc(roomId);
-    const playersRef = roomRef.collection('players').doc(hostPeerId);
+    const playersRef = roomRef.collection('players').doc(currentUser.uid);
 
     await runTransaction(async (transaction) => {
       const existing = await transaction.get(roomRef);
@@ -207,8 +252,11 @@
         hostPeerId,
       });
       transaction.set(playersRef, {
+        uid: currentUser.uid,
+        peerId: hostPeerId,
         name: resolvedHostName,
         joinedAt: getTimestampValue(),
+        isHost: true,
       });
     });
 
@@ -233,6 +281,11 @@
   const joinRoom = async (roomId, options) => {
     await ensureAuthReady();
     const firestore = ensureFirestore();
+    const { auth, user } = await ensureSignedInUser();
+    const currentUser = user || (auth && auth.currentUser);
+    if (!currentUser || !currentUser.uid) {
+      throw new Error('Unable to determine the authenticated user.');
+    }
     const playersName = typeof options === 'string' ? options : options && options.name;
     const resolvedName = playersName && playersName.trim() ? playersName.trim() : 'Player';
     const trimmedRoomId = sanitizeRoomId(roomId);
@@ -241,6 +294,7 @@
     }
     const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
     const peerId = generatePeerId();
+    const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
 
     await runTransaction(async (transaction) => {
       const roomSnapshot = await transaction.get(roomRef);
@@ -251,12 +305,17 @@
       const maxPlayers = typeof roomData.maxPlayers === 'number' ? roomData.maxPlayers : 9;
       const playersCollection = roomRef.collection('players');
       const playersSnapshot = await transaction.get(playersCollection);
-      if (playersSnapshot && playersSnapshot.size >= maxPlayers) {
+      const existingPlayerDoc = await transaction.get(playerDocRef);
+      const alreadyPresent = existingPlayerDoc && existingPlayerDoc.exists;
+      if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
         throw new Error('This room is already full.');
       }
-      transaction.set(playersCollection.doc(peerId), {
+      transaction.set(playerDocRef, {
+        uid: currentUser.uid,
+        peerId,
         name: resolvedName,
         joinedAt: getTimestampValue(),
+        isHost: false,
       });
     });
 

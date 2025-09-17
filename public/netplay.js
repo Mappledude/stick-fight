@@ -22,6 +22,7 @@
     localSlot: 'p1',
     slotAssignments: {},
     playerDirectory: {},
+    playerPeerIdsByUid: {},
     connections: new Map(),
     peerInputs: {},
     remotePlayers: [],
@@ -447,10 +448,27 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
       (snapshot) => {
         snapshot.docChanges().forEach((change) => {
           const doc = change.doc;
-          const peerId = doc.id;
-          const data = doc.data() || {};
-          const name = data.name || 'Player';
+          if (!doc) {
+            return;
+          }
+          const uid = doc.id;
+          const data = (typeof doc.data === 'function' ? doc.data() : {}) || {};
+          const peerId = data.peerId || (uid ? runtime.playerPeerIdsByUid[uid] : null);
+          if (!peerId) {
+            if (change.type === 'removed' && uid && runtime.playerPeerIdsByUid[uid]) {
+              const storedPeerId = runtime.playerPeerIdsByUid[uid];
+              delete runtime.playerPeerIdsByUid[uid];
+              removePlayerFromDirectory(storedPeerId);
+              if (runtime.role === 'host') {
+                teardownConnection(storedPeerId);
+              }
+            } else if (change.type !== 'removed') {
+              console.warn('[Net] Player document missing peerId', { uid });
+            }
+            return;
+          }
           if (change.type === 'removed') {
+            delete runtime.playerPeerIdsByUid[uid];
             removePlayerFromDirectory(peerId);
             if (
               runtime.role === 'host' &&
@@ -468,30 +486,32 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
             }
             return;
           }
+
+          runtime.playerPeerIdsByUid[uid] = peerId;
+          const name = data.name || 'Player';
           updatePlayerDirectory(peerId, name);
-if (runtime.role === 'host' && peerId !== runtime.localPeerId) {
-  ensureHostConnection(peerId);
-}
-if (
-  change.type === 'added' &&
-  runtime.role === 'host' &&
-  runtime.scene &&
-  typeof runtime.scene.onNetPeerJoined === 'function'
-) {
-  try {
-    runtime.scene.onNetPeerJoined(peerId, { isLocal: peerId === runtime.localPeerId });
-  } catch (err) {
-    console.warn('[Net] Failed to notify scene of peer join', err);
-  }
-}
 
           if (!runtime.slotAssignments.p1 && data.isHost) {
             runtime.slotAssignments.p1 = peerId;
           }
+
           if (runtime.role === 'host') {
             ensureHostServerPlayer(peerId);
             if (peerId !== runtime.localPeerId) {
               ensureHostConnection(peerId);
+            }
+          }
+
+          if (
+            change.type === 'added' &&
+            runtime.role === 'host' &&
+            runtime.scene &&
+            typeof runtime.scene.onNetPeerJoined === 'function'
+          ) {
+            try {
+              runtime.scene.onNetPeerJoined(peerId, { isLocal: peerId === runtime.localPeerId });
+            } catch (err) {
+              console.warn('[Net] Failed to notify scene of peer join', err);
             }
           }
         });
