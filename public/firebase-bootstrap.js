@@ -18,12 +18,102 @@
     auth: null,
     firestore: null,
     fieldValue: null,
+    scriptType: null,
+    sdkType: null,
+    scriptElement: null,
     logs: {
       host: false,
       init: false,
       sw: false,
     },
   };
+
+  function detectScriptElement() {
+    if (state.scriptElement) {
+      return state.scriptElement;
+    }
+
+    try {
+      if (typeof document === 'undefined' || !document) {
+        return null;
+      }
+
+      if (document.currentScript) {
+        state.scriptElement = document.currentScript;
+        return state.scriptElement;
+      }
+
+      if (typeof document.getElementsByTagName === 'function') {
+        const scripts = document.getElementsByTagName('script');
+        for (let i = scripts.length - 1; i >= 0; i -= 1) {
+          const candidate = scripts[i];
+          if (!candidate) {
+            continue;
+          }
+          const src = candidate.getAttribute ? candidate.getAttribute('src') : candidate.src;
+          if (typeof src !== 'string' || src === '') {
+            continue;
+          }
+          if (src.indexOf('firebase-bootstrap.js') !== -1) {
+            state.scriptElement = candidate;
+            return state.scriptElement;
+          }
+        }
+      }
+    } catch (error) {
+      // Ignore DOM access failures.
+    }
+
+    return null;
+  }
+
+  function detectScriptType() {
+    if (state.scriptType) {
+      return state.scriptType;
+    }
+
+    let type = 'classic';
+    try {
+      const script = detectScriptElement();
+      if (script) {
+        let attr = null;
+        if (typeof script.type === 'string' && script.type !== '') {
+          attr = script.type;
+        } else if (script.getAttribute) {
+          attr = script.getAttribute('type');
+        }
+        if (typeof attr === 'string' && attr.toLowerCase() === 'module') {
+          type = 'module';
+        }
+      }
+    } catch (error) {
+      // Ignore failures; default to classic.
+    }
+
+    state.scriptType = type;
+    return state.scriptType;
+  }
+
+  function detectSdkType(namespace) {
+    if (state.sdkType) {
+      return state.sdkType;
+    }
+
+    let type = 'compat';
+    try {
+      if (namespace && typeof namespace === 'object') {
+        const hasCompatApps = namespace.apps && typeof namespace.apps.length === 'number';
+        if (!hasCompatApps && typeof namespace.getApps === 'function') {
+          type = 'modular';
+        }
+      }
+    } catch (error) {
+      // Ignore detection errors; default to compat.
+    }
+
+    state.sdkType = type;
+    return state.sdkType;
+  }
 
   const noopBoot = {
     log: function () {},
@@ -209,15 +299,16 @@
     log('SW', 'status=' + status + ' controller=' + controller);
   }
 
-  function logInitOnce(namespace, action) {
+  function logInitOnce(namespace, reused) {
     if (state.logs.init) {
       return;
     }
     state.logs.init = true;
 
-    const version = namespace && typeof namespace.SDK_VERSION === 'string' ? namespace.SDK_VERSION : 'unknown';
-    const appsCount = namespace && namespace.apps && typeof namespace.apps.length === 'number' ? namespace.apps.length : 0;
-    log('INIT', 'firebase-app ' + action + ' sdk=' + version + ' apps=' + appsCount);
+    const sdkType = detectSdkType(namespace);
+    const scriptType = detectScriptType();
+    const reusedValue = reused ? 'yes' : 'no';
+    log('INIT', 'sdk=' + sdkType + ' scriptType=' + scriptType + ' reusedApp=' + reusedValue);
   }
 
   function warnConfigMismatch(existingConfig, expectedConfig) {
@@ -274,15 +365,31 @@
     const namespace = getFirebaseNamespace();
     const config = ensureConfig(boot);
 
-    const apps = namespace.apps && typeof namespace.apps.length === 'number' ? namespace.apps : [];
+    const hasCompatApps = namespace.apps && typeof namespace.apps.length === 'number';
+    let apps = [];
+    if (hasCompatApps) {
+      apps = namespace.apps;
+    } else if (typeof namespace.getApps === 'function') {
+      try {
+        const modularApps = namespace.getApps();
+        if (modularApps && typeof modularApps.length === 'number') {
+          apps = modularApps;
+        }
+      } catch (error) {
+        apps = [];
+      }
+    }
+
     if (apps && apps.length > 0) {
-      const existingApp = typeof namespace.app === 'function' ? namespace.app() : apps[0];
+      const existingApp = hasCompatApps
+        ? (typeof namespace.app === 'function' ? namespace.app() : apps[0])
+        : (typeof namespace.getApp === 'function' ? namespace.getApp() : apps[0]);
       const existingConfig = existingApp && existingApp.options ? existingApp.options : null;
       if (existingConfig && !configsMatch(existingConfig, config)) {
         warnConfigMismatch(existingConfig, config);
       }
       state.app = existingApp;
-      logInitOnce(namespace, 'reused');
+      logInitOnce(namespace, true);
       return state.app;
     }
 
@@ -291,7 +398,7 @@
     }
 
     state.app = namespace.initializeApp(config);
-    logInitOnce(namespace, 'created');
+    logInitOnce(namespace, false);
     return state.app;
   }
 

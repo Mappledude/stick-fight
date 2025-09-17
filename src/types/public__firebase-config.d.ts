@@ -27,8 +27,8 @@ export interface FirebaseConfigLoggers {
 }
 
 export interface FirebaseConfigResolveResult {
-  config: FirebaseOptions;
-  source: 'window' | 'inline';
+  config: FirebaseOptions | null;
+  source: 'firebase-init' | 'window' | 'inline' | 'none';
   key?: string;
 }
 
