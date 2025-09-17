@@ -19,6 +19,116 @@
   const LAYOUT_POLL_INTERVAL = 16;
   const LAYOUT_POLL_TIMEOUT = 500;
   const JOY_TRACE_INTERVAL = 250;
+  const PLAY_ASPECT_MIN = 4 / 3;
+  const PLAY_ASPECT_MAX = 16 / 9;
+
+  function parsePlayPadOverride(value) {
+    if (typeof value !== 'string') {
+      return null;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = parseFloat(trimmed);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return null;
+    }
+    return parsed;
+  }
+
+  function computePlayArea(viewW, viewH, padOverride) {
+    const safeViewW = Math.max(Math.round(viewW || 0), 0);
+    const safeViewH = Math.max(Math.round(viewH || 0), 0);
+    const PAD = 12;
+    const EDGE = Math.round(Math.min(safeViewW, safeViewH) * 0.03);
+    const resolvedPad = typeof padOverride === 'number' ? Math.max(padOverride, 0) : Math.max(PAD, EDGE);
+
+    const availableWidth = Math.max(safeViewW - resolvedPad * 2, MIN_LAYOUT_WIDTH);
+    const availableHeight = Math.max(safeViewH - resolvedPad * 2, MIN_LAYOUT_HEIGHT);
+
+    let width = availableWidth;
+    let height = availableHeight;
+
+    if (width <= 0 || height <= 0) {
+      width = Math.max(width, MIN_LAYOUT_WIDTH);
+      height = Math.max(height, MIN_LAYOUT_HEIGHT);
+    }
+
+    let aspect = width / height;
+
+    if (aspect < PLAY_ASPECT_MIN) {
+      const targetHeight = width / PLAY_ASPECT_MIN;
+      if (targetHeight >= MIN_LAYOUT_HEIGHT) {
+        height = Math.min(height, targetHeight);
+      } else {
+        const targetWidth = height * PLAY_ASPECT_MIN;
+        width = Math.max(MIN_LAYOUT_WIDTH, Math.min(width, targetWidth));
+      }
+    } else if (aspect > PLAY_ASPECT_MAX) {
+      const targetWidth = height * PLAY_ASPECT_MAX;
+      if (targetWidth >= MIN_LAYOUT_WIDTH) {
+        width = Math.min(width, targetWidth);
+      } else {
+        const targetHeight = width / PLAY_ASPECT_MAX;
+        height = Math.max(MIN_LAYOUT_HEIGHT, Math.min(height, targetHeight));
+      }
+    }
+
+    width = Math.max(Math.min(width, availableWidth), MIN_LAYOUT_WIDTH);
+    height = Math.max(Math.min(height, availableHeight), MIN_LAYOUT_HEIGHT);
+
+    const x = Math.round((safeViewW - width) / 2);
+    const y = Math.round((safeViewH - height) / 2);
+
+    return { x, y, w: Math.round(width), h: Math.round(height) };
+  }
+
+  function clampToPlay(target, play) {
+    if (!target || !play) {
+      return { changedX: false, changedY: false };
+    }
+    const body = target.body || null;
+    const halfWidth = body && typeof body.halfWidth === 'number'
+      ? body.halfWidth
+      : body && typeof body.width === 'number'
+      ? body.width / 2
+      : 14;
+    const halfHeight = body && typeof body.halfHeight === 'number'
+      ? body.halfHeight
+      : body && typeof body.height === 'number'
+      ? body.height / 2
+      : 32;
+
+    const minX = play.x + halfWidth;
+    const maxX = play.x + play.w - halfWidth;
+    const minY = play.y + halfHeight;
+    const maxY = play.y + play.h - halfHeight;
+
+    const clampedX = Phaser.Math.Clamp(target.x, minX, maxX);
+    const clampedY = Phaser.Math.Clamp(target.y, minY, maxY);
+
+    const changedX = clampedX !== target.x;
+    const changedY = clampedY !== target.y;
+
+    if (changedX) {
+      if (typeof target.setX === 'function') {
+        target.setX(clampedX);
+      } else {
+        target.x = clampedX;
+      }
+    }
+
+    if (changedY) {
+      if (typeof target.setY === 'function') {
+        target.setY(clampedY);
+      } else {
+        target.y = clampedY;
+      }
+    }
+
+    return { changedX, changedY };
+  }
 
   const traceControls = (() => {
     const state = {
@@ -837,6 +947,13 @@
       this._joyDiagEnabled = false;
       this._joyDiagModes = this.getDefaultJoyDiagModes();
 
+      this.playArea = { x: 0, y: 0, w: MIN_LAYOUT_WIDTH, h: MIN_LAYOUT_HEIGHT };
+      this._playAreaPadOverride = null;
+      this.playBorder = null;
+      this._playAreaDiagText = null;
+      this._playAreaDiagGrid = null;
+      this._playAreaDiagLastText = null;
+
       const parseDebugFlag = (value) => {
         if (typeof value !== 'string') {
           return false;
@@ -860,6 +977,11 @@
           this._forceJoystick = parseDebugFlag(params.get('forceJoystick'));
           this._forceKeyboard = parseDebugFlag(params.get('forceKeyboard'));
 
+          const playPadOverride = parsePlayPadOverride(params.get('playpad'));
+          if (playPadOverride !== null) {
+            this._playAreaPadOverride = playPadOverride;
+          }
+
           if (parsedJoyDiag) {
             this.applyJoyDiagConfig(parsedJoyDiag);
           } else {
@@ -879,6 +1001,13 @@
           const searchLower = searchString.toLowerCase();
           this._forceJoystick = /[?&]forcejoystick=(1|true|yes|on)\b/.test(searchLower);
           this._forceKeyboard = /[?&]forcekeyboard=(1|true|yes|on)\b/.test(searchLower);
+
+          const playPadMatch = searchString.match(/[?&]playpad=([^&#]*)/i);
+          const playPadValue = playPadMatch ? decodeURIComponent(playPadMatch[1]) : null;
+          const playPadOverride = parsePlayPadOverride(playPadValue);
+          if (playPadOverride !== null) {
+            this._playAreaPadOverride = playPadOverride;
+          }
 
           if (parsedJoyDiag) {
             this.applyJoyDiagConfig(parsedJoyDiag);
@@ -1518,6 +1647,11 @@
     create() {
       this.cameras.main.setBackgroundColor('#111');
 
+      if (!this.playBorder && this.add && typeof this.add.graphics === 'function') {
+        this.playBorder = this.add.graphics();
+        this.playBorder.setDepth(9);
+      }
+
       if (this.diagnosticsActive() && typeof console !== 'undefined' && console) {
         const modes = [];
         if (this._joyDiagModes.noControls) {
@@ -1731,7 +1865,7 @@
         this.spawnFighters();
       }
 
-      this.clampFightersToWorld();
+      this.clampFightersToPlayArea();
       this.applyResize(resolvedSize);
       this._pendingResizeSize = resolvedSize;
     }
@@ -1749,50 +1883,184 @@
         typeof size.height === 'number' ? size.height : 0,
         MIN_LAYOUT_HEIGHT
       );
-      this.physics.world.setBounds(0, 0, width, height);
+      const play = computePlayArea(width, height, this._playAreaPadOverride);
+      this.playArea = play;
+      this.physics.world.setBounds(play.x, play.y, play.w, play.h, true, true, true, true);
+
+      const camera = this.cameras ? this.cameras.main : null;
+      if (camera) {
+        camera.setBounds(play.x, play.y, play.w, play.h);
+        camera.setScroll(play.x, play.y);
+      }
+
+      this.updatePlayAreaBorder();
+      this.updatePlayAreaDiagnostics(true);
     }
 
-    clampFightersToWorld() {
-      if (!this._fighters || !this.physics || !this.physics.world) {
+    clampFightersToPlayArea() {
+      if (!this._fighters || !this.playArea) {
         return;
       }
-      const bounds = this.physics.world.bounds;
-      if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
-        return;
-      }
-
       this._fighters.forEach((fighter) => {
         if (!fighter) {
           return;
         }
         const body = /** @type {Phaser.Physics.Arcade.Body} */ (fighter.body);
-        if (!body) {
-          return;
+        const play = this.playArea;
+        const result = clampToPlay(fighter, play);
+
+        if (body) {
+          if (result.changedX) {
+            body.setVelocityX(0);
+          }
+          if (result.changedY) {
+            body.setVelocityY(0);
+          }
         }
 
-        const halfWidth = body.width / 2;
-        const halfHeight = body.height / 2;
-        const minX = bounds.x + halfWidth;
-        const maxX = bounds.right - halfWidth;
-        const minY = bounds.y + halfHeight;
-        const maxY = bounds.bottom - halfHeight;
-
-        const clampedX = Phaser.Math.Clamp(fighter.x, minX, maxX);
-        const clampedY = Phaser.Math.Clamp(fighter.y, minY, maxY);
-
-        if (clampedX !== fighter.x) {
-          fighter.setX(clampedX);
-          body.setVelocityX(0);
+        if (fighter.setAlpha) {
+          fighter.setAlpha(1);
         }
-
-        if (clampedY !== fighter.y) {
-          fighter.setY(clampedY);
-          body.setVelocityY(0);
+        if (fighter.setVisible) {
+          fighter.setVisible(true);
         }
-
-        fighter.setAlpha(1);
-        fighter.setVisible(true);
       });
+    }
+
+    updatePlayAreaBorder() {
+      if (!this.playBorder || !this.playArea) {
+        return;
+      }
+
+      const play = this.playArea;
+      const border = this.playBorder;
+
+      border.clear();
+
+      if (!play || play.w <= 0 || play.h <= 0) {
+        border.setVisible(false);
+        return;
+      }
+
+      border.setVisible(true);
+      border.setDepth(9);
+      border.lineStyle(3, 0xffffff, 0.8);
+      border.strokeRect(
+        play.x + 0.5,
+        play.y + 0.5,
+        Math.max(play.w - 1, 0),
+        Math.max(play.h - 1, 0)
+      );
+
+      if (play.w > 12 && play.h > 12) {
+        border.lineStyle(1, 0xffffff, 0.25);
+        border.strokeRect(
+          play.x + 6.5,
+          play.y + 6.5,
+          Math.max(play.w - 13, 0),
+          Math.max(play.h - 13, 0)
+        );
+      }
+    }
+
+    updatePlayAreaDiagnostics(forceRedraw) {
+      const play = this.playArea;
+      if (!play) {
+        return;
+      }
+
+      const diagnosticsActive = this.diagnosticsActive();
+      if (!diagnosticsActive) {
+        if (this._playAreaDiagText) {
+          this._playAreaDiagText.setVisible(false);
+        }
+        if (this._playAreaDiagGrid) {
+          this._playAreaDiagGrid.clear();
+          this._playAreaDiagGrid.setVisible(false);
+        }
+        return;
+      }
+
+      const label =
+        'Play: ' +
+        Math.round(play.x) +
+        ',' +
+        Math.round(play.y) +
+        ' ' +
+        Math.round(play.w) +
+        '×' +
+        Math.round(play.h);
+
+      const needsCreate = !this._playAreaDiagText || !this._playAreaDiagGrid;
+      const shouldRedraw = forceRedraw || needsCreate || this._playAreaDiagLastText !== label;
+
+      if (shouldRedraw) {
+        if (!this._playAreaDiagText && this.add && typeof this.add.text === 'function') {
+          this._playAreaDiagText = this.add
+            .text(12, 108, '', {
+              fontFamily: 'monospace',
+              fontSize: '12px',
+              color: '#00ffee',
+            })
+            .setOrigin(0, 0)
+            .setScrollFactor(0)
+            .setDepth(60);
+        }
+
+        if (this._playAreaDiagText) {
+          this._playAreaDiagText.setText(label);
+          this._playAreaDiagText.setVisible(true);
+        }
+
+        if (!this._playAreaDiagGrid && this.add && typeof this.add.graphics === 'function') {
+          this._playAreaDiagGrid = this.add.graphics();
+          this._playAreaDiagGrid.setDepth(8);
+        }
+
+        const grid = this._playAreaDiagGrid;
+        if (grid) {
+          grid.clear();
+
+          if (play.w > 0 && play.h > 0) {
+            const baseStep = Math.max(48, Math.round(Math.min(play.w, play.h) / 6));
+            const step = Math.max(24, baseStep);
+            const useLineBetween = grid.lineBetween && typeof grid.lineBetween === 'function';
+            grid.lineStyle(1, 0xffffff, 0.08);
+            if (useLineBetween) {
+              for (let x = play.x + step; x < play.x + play.w; x += step) {
+                grid.lineBetween(x, play.y + 2, x, play.y + play.h - 2);
+              }
+              for (let y = play.y + step; y < play.y + play.h; y += step) {
+                grid.lineBetween(play.x + 2, y, play.x + play.w - 2, y);
+              }
+            } else {
+              grid.beginPath();
+              for (let x = play.x + step; x < play.x + play.w; x += step) {
+                grid.moveTo(x, play.y + 2);
+                grid.lineTo(x, play.y + play.h - 2);
+              }
+              for (let y = play.y + step; y < play.y + play.h; y += step) {
+                grid.moveTo(play.x + 2, y);
+                grid.lineTo(play.x + play.w - 2, y);
+              }
+              grid.strokePath();
+            }
+          }
+          grid.setVisible(true);
+        }
+        this._playAreaDiagLastText = label;
+
+        if (typeof console !== 'undefined' && console && typeof console.info === 'function') {
+          console.info('[PlayArea] ' + label);
+        }
+      } else {
+        if (this._playAreaDiagText) {
+          this._playAreaDiagText.setVisible(true);
+        }
+        if (this._playAreaDiagGrid) {
+          this._playAreaDiagGrid.setVisible(true);
+        }
+      }
     }
 
     handleResize(gameSize) {
@@ -1837,7 +2105,6 @@
       const camera = this.cameras.main;
       if (camera) {
         camera.setViewport(0, 0, safeWidth, safeHeight);
-        camera.centerOn(safeWidth / 2, safeHeight / 2);
       }
 
       this.updateSafeAreaInsets();
@@ -1848,7 +2115,9 @@
 
       if (this._layoutReady) {
         this.refreshWorldBounds(size);
-        this.clampFightersToWorld();
+        this.clampFightersToPlayArea();
+      } else {
+        this.updatePlayAreaDiagnostics(false);
       }
 
       if (this.diagnosticsActive()) {
@@ -1896,6 +2165,8 @@
       if (this._joyDiagFrameState) {
         this._joyDiagFrameState.preResetMoveX = this.p1Input ? this.p1Input.moveX : null;
       }
+
+      this.updatePlayAreaDiagnostics(false);
 
       this.resetMomentaryInputFlags();
 
