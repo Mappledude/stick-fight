@@ -267,11 +267,22 @@
     log('HOST', 'origin=' + origin + ' route=' + route + ' authDomain=' + config.authDomain);
   }
 
-  function logServiceWorkerOnce() {
+  function logServiceWorkerOnce(boot) {
     if (state.logs.sw) {
       return;
     }
     state.logs.sw = true;
+
+    const resolvedBoot = resolveBoot(boot);
+    const bootFlags =
+      resolvedBoot && resolvedBoot.flags && typeof resolvedBoot.flags === 'object'
+        ? resolvedBoot.flags
+        : null;
+    const debugMode = !!(bootFlags && bootFlags.debug);
+    if (debugMode) {
+      log('SW', 'registered=no (debug)');
+      return;
+    }
 
     let status = 'unsupported';
     let controller = 'none';
@@ -312,6 +323,7 @@
 
   function ensureConfig(boot) {
     resolveBoot(boot);
+    logServiceWorkerOnce(boot);
     const raw = readGlobalConfigCandidate();
     if (!raw && state.config) {
       return state.config;
@@ -324,7 +336,7 @@
     if (!state.config) {
       state.config = validated;
       logHostOnce(validated);
-      logServiceWorkerOnce();
+      logServiceWorkerOnce(boot);
       return state.config;
     }
 

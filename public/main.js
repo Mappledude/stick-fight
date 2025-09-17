@@ -90,7 +90,40 @@
           console.error('[CFG][ERR] ' + message);
         }
 
-        const sw = typeof navigator !== 'undefined' && navigator && navigator.serviceWorker ? navigator.serviceWorker : null;
+// Resolve boot flags (if present) to detect debug mode
+const bootFlags =
+  Boot && Boot.flags && typeof Boot.flags === 'object' ? Boot.flags : null;
+const debugMode = !!(bootFlags && bootFlags.debug);
+
+// Service worker handle
+const sw =
+  typeof navigator !== 'undefined' && navigator && navigator.serviceWorker
+    ? navigator.serviceWorker
+    : null;
+
+if (debugMode) {
+  // Skip SW in debug mode
+  console.info('[SW] registered=no (debug)');
+} else if (sw && typeof sw.register === 'function') {
+  // Normal registration path
+  sw
+    .register('/service-worker.js')
+    .then((reg) => {
+      const scope =
+        (reg && reg.scope) || (reg && reg.active && reg.active.scriptURL) || '';
+      const hasController =
+        !!(navigator && navigator.serviceWorker && navigator.serviceWorker.controller);
+      console.info(
+        `[SW] registered=yes scope=${scope} controller=${hasController ? 'present' : 'none'}`
+      );
+    })
+    .catch((err) => {
+      console.error('[SW] registered=no error=', err && (err.message || err));
+    });
+} else {
+  console.info('[SW] registered=no (unsupported)');
+}
+
         if (sw && sw.ready && typeof sw.ready.then === 'function') {
           sw.ready
             .then((registration) => {
@@ -102,6 +135,38 @@
             })
             .catch(() => undefined);
         }
+// Resolve boot flags
+const bootFlags =
+  Boot && Boot.flags && typeof Boot.flags === 'object' ? Boot.flags : null;
+const debugMode = !!(bootFlags && bootFlags.debug);
+
+// SW handle
+const sw =
+  typeof navigator !== 'undefined' && navigator && navigator.serviceWorker
+    ? navigator.serviceWorker
+    : null;
+
+if (debugMode) {
+  console.info('[SW] registered=no (debug)');
+} else if (sw && typeof sw.register === 'function') {
+  sw
+    .register('/service-worker.js')
+    .then((reg) => {
+      const scope =
+        (reg && reg.scope) || (reg && reg.active && reg.active.scriptURL) || '';
+      const hasController =
+        !!(navigator && navigator.serviceWorker && navigator.serviceWorker.controller);
+      console.info(
+        `[SW] registered=yes scope=${scope} controller=${hasController ? 'present' : 'none'}`
+      );
+    })
+    .catch((err) => {
+      console.error('[SW] registered=no error=', err && (err.message || err));
+    });
+} else {
+  console.info('[SW] registered=no (unsupported)');
+}
+
 
         logDiagnostic('CFG', 'hint: Shift+Reload to bypass stale service worker');
 
