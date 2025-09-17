@@ -1,0 +1,48 @@
+.hud-root {
+  position: fixed;
+  top: calc(env(safe-area-inset-top) + 16px);
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  pointer-events: none;
+  padding: 0 16px;
+  z-index: 20;
+}
+
+.hud-player {
+  min-width: 120px;
+  max-width: 180px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  padding: 8px 12px;
+  color: #fff;
+  font: 600 12px/1.4 system-ui;
+  pointer-events: auto;
+}
+
+.hud-nick {
+  display: block;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.hud-bar {
+  position: relative;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.hud-bar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, #ff5252, #ffc107);
+  border-radius: inherit;
+}
