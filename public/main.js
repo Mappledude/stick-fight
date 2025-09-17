@@ -95,13 +95,69 @@
         Phaser.Geom.Circle.Contains
       );
 
-      this.on('pointerdown', this.handlePointerDown, this);
-      this.on('pointermove', this.handlePointerMove, this);
-      this.on('pointerup', this.handlePointerUp, this);
-      this.on('pointerupoutside', this.handlePointerUp, this);
-      this.on('pointercancel', this.handlePointerUp, this);
-      this.on('pointerout', this.handlePointerUp, this);
-      this.on('lostpointercapture', this.handlePointerUp, this);
+      if (this.diagnosticsEnabled()) {
+        const hitRadius = this.radius + this.hitPadding;
+        this.logDiagnostics('setup', {
+          hasInput: !!this.input,
+          hitArea: { radius: hitRadius, diameter: hitRadius * 2 },
+          cursor: this.input ? this.input.cursor : null,
+          depths: {
+            container: this.depth,
+            outerRing: this.outerRing ? this.outerRing.depth : undefined,
+            knob: this.knob ? this.knob.depth : undefined,
+          },
+        });
+      }
+
+      this.on(
+        'pointerdown',
+        function (pointer) {
+          this.handlePointerDown(pointer, 'pointerdown');
+        },
+        this
+      );
+      this.on(
+        'pointermove',
+        function (pointer) {
+          this.handlePointerMove(pointer, 'pointermove');
+        },
+        this
+      );
+      this.on(
+        'pointerup',
+        function (pointer) {
+          this.handlePointerUp(pointer, 'pointerup');
+        },
+        this
+      );
+      this.on(
+        'pointerupoutside',
+        function (pointer) {
+          this.handlePointerUp(pointer, 'pointerupoutside');
+        },
+        this
+      );
+      this.on(
+        'pointercancel',
+        function (pointer) {
+          this.handlePointerUp(pointer, 'pointercancel');
+        },
+        this
+      );
+      this.on(
+        'pointerout',
+        function (pointer) {
+          this.handlePointerUp(pointer, 'pointerout');
+        },
+        this
+      );
+      this.on(
+        'lostpointercapture',
+        function (pointer) {
+          this.handlePointerUp(pointer, 'lostpointercapture');
+        },
+        this
+      );
 
       this.scene.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
         this.reset();
@@ -143,54 +199,66 @@
       return this.pointerId !== null && this.magnitude > this.deadzone;
     }
 
-    handlePointerDown(pointer) {
-      if (!this.enabled) {
-        return;
-      }
-      const pointerId = this.getPointerId(pointer);
-      if (this.pointerId !== null && this.pointerId !== pointerId) {
-        return;
-      }
-      this.pointerId = pointerId;
-      if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
-        this.scene.preventPointerDefault(pointer);
-      }
-      this.updateFromPointer(pointer);
-      this.emit('joystickstart', this.vector);
+    handlePointerDown(pointer, eventType = 'pointerdown') {
+      return this.withDiagnostics(eventType, pointer, (ptr, pointerId) => {
+        if (!this.enabled) {
+          return false;
+        }
+        if (this.pointerId !== null && this.pointerId !== pointerId) {
+          return false;
+        }
+        this.pointerId = pointerId;
+        if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
+          this.scene.preventPointerDefault(ptr);
+        }
+        this.updateFromPointer(ptr);
+        this.emit('joystickstart', this.vector);
+        return true;
+      });
     }
 
-    handlePointerMove(pointer) {
-      if (!this.enabled) {
-        return;
-      }
-      const pointerId = this.getPointerId(pointer);
-      if (this.pointerId !== pointerId) {
-        return;
-      }
-      if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
-        this.scene.preventPointerDefault(pointer);
-      }
-      this.updateFromPointer(pointer);
-      this.emit('joystickmove', this.vector);
+    handlePointerMove(pointer, eventType = 'pointermove') {
+      return this.withDiagnostics(eventType, pointer, (ptr, pointerId) => {
+        if (!this.enabled) {
+          return false;
+        }
+        if (this.pointerId !== pointerId) {
+          return false;
+        }
+        if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
+          this.scene.preventPointerDefault(ptr);
+        }
+        this.updateFromPointer(ptr);
+        this.emit('joystickmove', this.vector);
+        return true;
+      });
     }
 
-    handlePointerUp(pointer) {
-      const pointerId = this.getPointerId(pointer);
-      if (this.pointerId !== null && pointerId !== null && this.pointerId !== pointerId) {
-        return;
+    handlePointerUp(pointer, eventType = 'pointerup') {
+      return this.withDiagnostics(eventType, pointer, (ptr, pointerId) => {
+        if (this.pointerId !== null && pointerId !== null && this.pointerId !== pointerId) {
+          return false;
+        }
+        if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
+          this.scene.preventPointerDefault(ptr);
+        }
+        this.reset();
+        this.emit('joystickend');
+        return true;
+      });
+    }
+
+    getLocalPointerDelta(pointer) {
+      if (!pointer) {
+        return { x: 0, y: 0 };
       }
-      if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
-        this.scene.preventPointerDefault(pointer);
-      }
-      this.reset();
-      this.emit('joystickend');
+      const worldX = typeof pointer.worldX === 'number' ? pointer.worldX : pointer.x;
+      const worldY = typeof pointer.worldY === 'number' ? pointer.worldY : pointer.y;
+      return { x: worldX - this.x, y: worldY - this.y };
     }
 
     updateFromPointer(pointer) {
-      const worldX = typeof pointer.worldX === 'number' ? pointer.worldX : pointer.x;
-      const worldY = typeof pointer.worldY === 'number' ? pointer.worldY : pointer.y;
-      const dx = worldX - this.x;
-      const dy = worldY - this.y;
+      const { x: dx, y: dy } = this.getLocalPointerDelta(pointer);
       const distance = Math.sqrt(dx * dx + dy * dy);
       const clampedDistance = Math.min(distance, this.radius);
       const angle = Math.atan2(dy, dx);
@@ -211,6 +279,41 @@
         Phaser.Math.Clamp(knobX / this.radius, -1, 1),
         Phaser.Math.Clamp(knobY / this.radius, -1, 1)
       );
+    }
+
+    diagnosticsEnabled() {
+      return !!(this.scene && this.scene._joyDiagEnabled);
+    }
+
+    logDiagnostics(eventType, details) {
+      console.log('[VirtualJoystick]', eventType, details);
+    }
+
+    withDiagnostics(eventType, pointer, handler) {
+      const diagnosticsActive = this.diagnosticsEnabled();
+      const pointerId = this.getPointerId(pointer);
+      const prevKnobPos = this.knob
+        ? { x: this.knob.x, y: this.knob.y }
+        : { x: 0, y: 0 };
+      const localDelta = diagnosticsActive ? this.getLocalPointerDelta(pointer) : null;
+
+      const result = handler(pointer, pointerId);
+
+      if (diagnosticsActive) {
+        const newKnobPos = this.knob
+          ? { x: this.knob.x, y: this.knob.y }
+          : { x: 0, y: 0 };
+        const moved = newKnobPos.x !== prevKnobPos.x || newKnobPos.y !== prevKnobPos.y;
+        this.logDiagnostics(eventType, {
+          pointerId,
+          localDelta,
+          knob: { previous: prevKnobPos, next: newKnobPos },
+          moved,
+          result,
+        });
+      }
+
+      return result;
     }
 
     reset() {
