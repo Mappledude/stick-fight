@@ -1006,6 +1006,49 @@
 
       this.logRendererOverride();
 
+      if (this.diagnosticsActive()) {
+        const inputManager = this.input && this.input.manager ? this.input.manager : null;
+        if (inputManager) {
+          const config = inputManager.config || {};
+          const touchPlugin = inputManager.touch || null;
+          const topOnlyValue =
+            typeof inputManager.topOnly === 'boolean'
+              ? inputManager.topOnly
+              : !!inputManager.topOnly;
+          const touchDetails = touchPlugin
+            ? {
+                available: true,
+                enabled:
+                  typeof touchPlugin.enabled === 'boolean'
+                    ? touchPlugin.enabled
+                    : !!touchPlugin.enabled,
+                capture: typeof touchPlugin.capture === 'boolean' ? touchPlugin.capture : null,
+              }
+            : { available: false };
+
+          this.logJoyDiag('input', {
+            pointersTotal:
+              typeof inputManager.pointersTotal === 'number' ? inputManager.pointersTotal : null,
+            pointersMax:
+              typeof config.activePointers === 'number' ? config.activePointers : null,
+            touch: touchDetails,
+            setTopOnly: {
+              value: topOnlyValue,
+              method: typeof inputManager.setTopOnly,
+            },
+            config: {
+              touch: typeof config.touch !== 'undefined' ? config.touch : null,
+              inputQueue:
+                typeof config.inputQueue !== 'undefined' ? config.inputQueue : null,
+              disableContextMenu:
+                typeof config.disableContextMenu !== 'undefined'
+                  ? config.disableContextMenu
+                  : null,
+            },
+          });
+        }
+      }
+
       const skipCenterText = this.diagnosticsActive() && this._joyDiagModes.joystickOnly;
       if (!skipCenterText) {
         this.titleText = centerText(this, 'Stick-Fight', -28, { fontSize: '56px', fontStyle: '700' });
