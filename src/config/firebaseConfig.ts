@@ -1,3 +1,8 @@
+import {
+  normalizeFirebaseConfig as sharedNormalizeFirebaseConfig,
+  tryReadGlobalFirebaseConfig,
+} from '../../public/firebase-config.js';
+
 export interface FirebaseOptions {
   apiKey: string;
   authDomain: string;
@@ -23,25 +28,6 @@ export interface ResolvedFirebaseConfig {
   config: FirebaseOptions;
   metadata: FirebaseConfigMetadata;
 }
-
-const REQUIRED_KEYS: Array<keyof FirebaseOptions> = [
-  'apiKey',
-  'authDomain',
-  'projectId',
-  'appId',
-];
-
-const OPTIONAL_REQUIRED_KEYS: Array<keyof FirebaseOptions> = [
-  'storageBucket',
-  'messagingSenderId',
-];
-
-const WINDOW_CONFIG_KEYS = [
-  '__FIREBASE_CONFIG__',
-  'STICK_FIGHT_FIREBASE_CONFIG',
-  'STICKFIGHT_FIREBASE_CONFIG',
-  'STICKFIGHT_FIREBASE_OPTIONS',
-] as const;
 
 const ENV_KEY_MAP: Record<keyof FirebaseOptions, string[]> = {
   apiKey: ['VITE_FIREBASE_API_KEY', 'FIREBASE_API_KEY'],
@@ -92,15 +78,8 @@ function readGlobalConfig(): WindowConfigResult | null {
     return null;
   }
 
-  const globalScope = globalThis as Record<string, unknown>;
-
-  for (const key of WINDOW_CONFIG_KEYS) {
-    if (key in globalScope && globalScope[key]) {
-      return { value: globalScope[key], key };
-    }
-  }
-
-  return null;
+  const result = tryReadGlobalFirebaseConfig(globalThis);
+  return result ? { value: result.value, key: result.key } : null;
 }
 
 function readEnvValue(names: string[]): string | undefined {
@@ -149,40 +128,11 @@ function resolveMode(): 'development' | 'production' {
 }
 
 function validateConfig(rawConfig: unknown, source: ConfigSource): FirebaseOptions {
-  if (!rawConfig || typeof rawConfig !== 'object') {
-    console.error('[CFG][ERR] missing=object source=' + source);
-    throw new Error('Firebase configuration was not found. Make sure configuration values are defined.');
-  }
-
-  const candidate = rawConfig as Record<string, unknown>;
-  const missingKeys: string[] = [];
-
-  for (const key of REQUIRED_KEYS) {
-    const value = candidate[key as string];
-    if (typeof value !== 'string' || value.trim() === '') {
-      missingKeys.push(key);
-    }
-  }
-
-  for (const key of OPTIONAL_REQUIRED_KEYS) {
-    const value = candidate[key as string];
-    if (typeof value !== 'string' || value.trim() === '') {
-      missingKeys.push(key);
-    }
-  }
-
-  const apiKeyValue = candidate.apiKey;
-  if (typeof apiKeyValue === 'string' && apiKeyValue.length < 20) {
-    missingKeys.push('apiKey(len<20)');
-  }
-
-  if (missingKeys.length) {
-    console.error(`[CFG][ERR] missing=${missingKeys.join('|')} source=${source}`);
-    throw new Error(`Firebase configuration is missing required values: ${missingKeys.join(', ')}`);
-  }
-
-  const normalized: FirebaseOptions = Object.freeze({ ...candidate }) as FirebaseOptions;
-  return normalized;
+  return sharedNormalizeFirebaseConfig(rawConfig, source, {
+    error: (message: string) => {
+      console.error(message);
+    },
+  }) as FirebaseOptions;
 }
 
 function buildResult(config: FirebaseOptions, source: ConfigSource, debug: boolean): ResolvedFirebaseConfig {
