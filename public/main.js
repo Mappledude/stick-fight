@@ -1,4 +1,10 @@
 (function () {
+  function isMobileUA() {
+    var ua = (navigator && navigator.userAgent) ? navigator.userAgent : '';
+    ua = ua.toLowerCase();
+    return /iphone|ipad|ipod|android|mobile/.test(ua);
+  }
+
   const SPEED = 220;
   const ACCEL = 1200;
   const FRICTION = 1600;
@@ -8,7 +14,12 @@
   const JUMP_SPEED = 560;
   const JUMP_HORIZONTAL_SPEED = 260;
   const CROUCH_SPEED_SCALE = 0.35;
-  const JOYSTICK_RADIUS = 92;
+  const JOY_OUTER_R_BASE = 92;
+  const JOY_KNOB_R_BASE = Math.round(JOY_OUTER_R_BASE * 0.4);
+  const JOY_MOBILE_SCALE = isMobileUA() ? 0.7 : 1;
+  const JOY_OUTER_R = Math.round(JOY_OUTER_R_BASE * JOY_MOBILE_SCALE);
+  const JOY_KNOB_R = Math.round(JOY_KNOB_R_BASE * JOY_MOBILE_SCALE);
+  const JOY_HIT_PADDING = 10;
   const JOYSTICK_DEADZONE = 0.22;
   const JOYSTICK_JUMP_THRESHOLD = 0.48;
   const JOYSTICK_JUMP_HORIZONTAL_THRESHOLD = 0.32;
@@ -35,6 +46,21 @@
       return null;
     }
     return parsed;
+  }
+
+  function shrinkRect(rect, factor) {
+    if (!rect) {
+      return rect;
+    }
+    var ratio = 1 - (typeof factor === 'number' ? factor : 0);
+    if (ratio < 0) {
+      ratio = 0;
+    }
+    var cx = rect.x + rect.w * 0.5;
+    var cy = rect.y + rect.h * 0.5;
+    var w2 = rect.w * ratio;
+    var h2 = rect.h * ratio;
+    return { x: cx - w2 * 0.5, y: cy - h2 * 0.5, w: w2, h: h2 };
   }
 
   function computePlayArea(viewW, viewH, padOverride) {
@@ -81,7 +107,32 @@
     const x = Math.round((safeViewW - width) / 2);
     const y = Math.round((safeViewH - height) / 2);
 
-    return { x, y, w: Math.round(width), h: Math.round(height) };
+    let result = { x, y, w: Math.round(width), h: Math.round(height) };
+
+    if (isMobileUA()) {
+      const shrunk = shrinkRect(result, 0.3);
+      if (shrunk && typeof shrunk.w === 'number' && typeof shrunk.h === 'number') {
+        const centerX = shrunk.x + shrunk.w * 0.5;
+        const centerY = shrunk.y + shrunk.h * 0.5;
+        const width2 = Math.max(shrunk.w, MIN_LAYOUT_WIDTH);
+        const height2 = Math.max(shrunk.h, MIN_LAYOUT_HEIGHT);
+        result = {
+          x: Math.round(centerX - width2 * 0.5),
+          y: Math.round(centerY - height2 * 0.5),
+          w: Math.round(width2),
+          h: Math.round(height2),
+        };
+      } else {
+        result = {
+          x: Math.round(result.x),
+          y: Math.round(result.y),
+          w: Math.round(result.w),
+          h: Math.round(result.h),
+        };
+      }
+    }
+
+    return result;
   }
 
   function clampToPlay(target, play) {
@@ -382,11 +433,15 @@
       super(scene, x, y);
 
       scene.add.existing(this);
-      this.radius = config.radius || JOYSTICK_RADIUS;
-      this.innerRadius = config.innerRadius || Math.max(this.radius * 0.4, 28);
+      this.radius = typeof config.radius === 'number' ? config.radius : JOY_OUTER_R;
+      const resolvedInnerRadius =
+        typeof config.innerRadius === 'number' ? config.innerRadius : JOY_KNOB_R;
+      this.innerRadius = Math.max(12, Math.min(resolvedInnerRadius, this.radius));
       this.deadzone =
         typeof config.deadzone === 'number' ? Math.max(0, config.deadzone) : JOYSTICK_DEADZONE;
-      this.hitPadding = typeof config.hitPadding === 'number' ? config.hitPadding : 28;
+      const providedHitPadding =
+        typeof config.hitPadding === 'number' ? config.hitPadding : JOY_HIT_PADDING;
+      this.hitPadding = Math.max(providedHitPadding, JOY_HIT_PADDING);
       this.playerKey = config.playerKey || null;
       this.pointerId = null;
       this.vector = new Phaser.Math.Vector2(0, 0);
@@ -935,7 +990,7 @@
         size: 80,
         gap: 18,
         margin: 28,
-        joystickRadius: JOYSTICK_RADIUS,
+        joystickRadius: JOY_OUTER_R,
       };
       const nav = typeof navigator !== 'undefined' ? navigator : null;
       const win = typeof window !== 'undefined' ? window : null;
@@ -1440,7 +1495,7 @@
         }
 
         const applyPointerPosition = (targetX, targetY) => {
-          const radius = joystick.radius || JOYSTICK_RADIUS;
+          const radius = joystick.radius || JOY_OUTER_R;
           const clampedX = Phaser.Math.Clamp(targetX, -1, 1) * radius;
           const clampedY = Phaser.Math.Clamp(targetY, -1, 1) * radius;
           const worldX = joystick.x + clampedX;
@@ -1885,6 +1940,24 @@
       );
       const play = computePlayArea(width, height, this._playAreaPadOverride);
       this.playArea = play;
+
+      if (this.diagnosticsActive()) {
+        this.logJoyDiag('layout:playArea', {
+          mobile: isMobileUA(),
+          scale: JOY_MOBILE_SCALE,
+          play: {
+            x: play ? play.x : null,
+            y: play ? play.y : null,
+            w: play ? play.w : null,
+            h: play ? play.h : null,
+          },
+          joystick: {
+            outer: JOY_OUTER_R,
+            knob: JOY_KNOB_R,
+            hit: JOY_OUTER_R + JOY_HIT_PADDING,
+          },
+        });
+      }
       this.physics.world.setBounds(play.x, play.y, play.w, play.h, true, true, true, true);
 
       const camera = this.cameras ? this.cameras.main : null;
