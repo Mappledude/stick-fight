@@ -18,6 +18,9 @@
     if (typeof global === 'undefined') {
       return null;
     }
+    if (global.__FIREBASE_CONFIG__) {
+      return global.__FIREBASE_CONFIG__;
+    }
     if (global.STICK_FIGHT_FIREBASE_CONFIG) {
       return global.STICK_FIGHT_FIREBASE_CONFIG;
     }
@@ -53,6 +56,45 @@
     netState.fieldValue = firebase.firestore.FieldValue || null;
     return firestoreInstance;
   };
+
+  const ensureAuthReady = (() => {
+    let authPromise = null;
+
+    const ensure = async () => {
+      const firebase = firebaseNamespace();
+      if (!firebase || typeof firebase.auth !== 'function') {
+        return;
+      }
+
+      const auth = firebase.auth();
+      if (!auth) {
+        return;
+      }
+
+      if (auth.currentUser) {
+        return;
+      }
+
+      if (!authPromise) {
+        if (typeof auth.signInAnonymously !== 'function') {
+          throw new Error('Firebase Auth does not support anonymous sign-in.');
+        }
+        authPromise = auth
+          .signInAnonymously()
+          .catch((error) => {
+            authPromise = null;
+            throw error;
+          })
+          .then(() => {
+            authPromise = null;
+          });
+      }
+
+      return authPromise;
+    };
+
+    return () => ensure();
+  })();
 
   const getTimestampValue = () => {
     const firebase = firebaseNamespace();
@@ -144,6 +186,7 @@
   };
 
   const createRoom = async (options) => {
+    await ensureAuthReady();
     const firestore = ensureFirestore();
     const hostName = typeof options === 'string' ? options : options && options.name;
     const resolvedHostName = hostName && hostName.trim() ? hostName.trim() : 'Host';
@@ -188,6 +231,7 @@
   };
 
   const joinRoom = async (roomId, options) => {
+    await ensureAuthReady();
     const firestore = ensureFirestore();
     const playersName = typeof options === 'string' ? options : options && options.name;
     const resolvedName = playersName && playersName.trim() ? playersName.trim() : 'Player';
