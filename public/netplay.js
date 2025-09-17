@@ -45,9 +45,16 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
     guestCandidateUnsub: null,
     stateBroadcastTimer: null,
     serverStepTimer: null,
-    hostTick: 0,
-    lastFallbackStateWriteAt: null,
+// netplay.js state init (merged)
+hostTick: 0,                     // authoritative host tick (uint32 wrap handled on increment)
+lastFallbackStateWriteAt: null,  // timestamp (ms) of last FS fallback write
+lastStateSnapshotSerialized: null, // cached JSON string to avoid redundant writes/broadcasts
+
   };
+
+  function clearLastStateSnapshot() {
+    runtime.lastStateSnapshotSerialized = null;
+  }
 
   function detectDiagnosticsFlag() {
     if (typeof window === 'undefined' || !window.location) {
@@ -142,6 +149,7 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
     if (!runtime.registry || typeof runtime.registry.ensurePlayer !== 'function') {
       const playRect = determinePlayRect();
       runtime.registry = server.createRegistry(playRect ? { playRect } : {});
+      clearLastStateSnapshot();
     }
     if (runtime.registry && typeof runtime.registry.setPlayRect === 'function') {
       const playRect = determinePlayRect();
@@ -613,6 +621,9 @@ runtime.tick = runtime.hostTick;
     if (runtime.peerInputs && Object.prototype.hasOwnProperty.call(runtime.peerInputs, peerId)) {
       delete runtime.peerInputs[peerId];
     }
+    if (runtime.role === 'host') {
+      clearLastStateSnapshot();
+    }
     updateDiagnosticsOverlay();
   }
 
@@ -622,6 +633,9 @@ runtime.tick = runtime.hostTick;
     }
     const connection = createConnectionRecord(peerId);
     runtime.connections.set(peerId, connection);
+    if (runtime.role === 'host') {
+      clearLastStateSnapshot();
+    }
     setupHostPeerConnection(connection).catch((error) => {
       console.error('[Net] Host connection failed', error);
       teardownConnection(peerId);
@@ -647,6 +661,9 @@ runtime.tick = runtime.hostTick;
         }
       }, RATE_LOG_INTERVAL_MS);
       connection.rateTimers.push(hostStateRateTimer);
+      if (runtime.role === 'host') {
+        clearLastStateSnapshot();
+      }
       updateDiagnosticsOverlay();
     };
     stateChannel.onclose = () => {
@@ -655,6 +672,9 @@ runtime.tick = runtime.hostTick;
         clearInterval(hostStateRateTimer);
         connection.rateTimers = connection.rateTimers.filter((timer) => timer !== hostStateRateTimer);
         hostStateRateTimer = null;
+      }
+      if (runtime.role === 'host') {
+        clearLastStateSnapshot();
       }
       updateDiagnosticsOverlay();
     };
@@ -889,6 +909,9 @@ return {
     if (!serialized) {
       return;
     }
+    if (serialized === runtime.lastStateSnapshotSerialized) {
+      return;
+    }
     let sentCount = 0;
     let hasOpenStateChannel = false;
     runtime.connections.forEach((connection) => {
@@ -910,7 +933,18 @@ return {
     });
     if (sentCount > 0) {
       runtime.lastStateBroadcastAt = now;
-      return;
+const serialized = JSON.stringify(stateForSnapshot);
+
+if (serialized === runtime.lastStateSnapshotSerialized) {
+  // No change since last snapshot — avoid redundant write/broadcast.
+  return;
+}
+
+// State changed — cache and proceed.
+runtime.lastStateSnapshotSerialized = serialized;
+
+// ... continue to broadcast via RTC and/or write Firestore fallback
+
     }
 
     if (hasOpenStateChannel) {
@@ -1326,6 +1360,7 @@ return {
     runtime.lastStateTimestamp = null;
     runtime.lastStateTick = null;
     runtime.lastSnapshotLatencyMs = null;
+    clearLastStateSnapshot();
     updateDiagnosticsOverlay();
   }
 
