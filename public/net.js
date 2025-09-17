@@ -57,29 +57,38 @@
     listening: false,
   };
 
-  const firebaseNamespace = () => (typeof global.firebase !== 'undefined' ? global.firebase : null);
+  const FirebaseBootstrap =
+    global && typeof global.__StickFightFirebaseBootstrap === 'object'
+      ? global.__StickFightFirebaseBootstrap
+      : null;
 
-  const getFirebaseConfig = () => {
-    if (typeof global === 'undefined') {
-      return null;
+  let firebaseBootstrapEnv = null;
+
+  const ensureFirebaseEnv = () => {
+    if (NETWORK_DISABLED) {
+      throw new Error('Networking disabled by query flags.');
     }
-    if (global.__FIREBASE_CONFIG__) {
-      return global.__FIREBASE_CONFIG__;
+    if (firebaseBootstrapEnv) {
+      return firebaseBootstrapEnv;
     }
-    if (global.STICK_FIGHT_FIREBASE_CONFIG) {
-      return global.STICK_FIGHT_FIREBASE_CONFIG;
+    if (!FirebaseBootstrap || typeof FirebaseBootstrap.bootstrap !== 'function') {
+      throw new Error('Firebase bootstrap helper unavailable.');
     }
-    if (global.STICKFIGHT_FIREBASE_CONFIG) {
-      return global.STICKFIGHT_FIREBASE_CONFIG;
-    }
-    if (global.STICKFIGHT_FIREBASE_OPTIONS) {
-      return global.STICKFIGHT_FIREBASE_OPTIONS;
-    }
-    return null;
+    firebaseBootstrapEnv = FirebaseBootstrap.bootstrap(Boot);
+    return firebaseBootstrapEnv;
   };
 
   const describeFirebaseConfig = () => {
-    const config = getFirebaseConfig();
+    let config = null;
+    try {
+      if (FirebaseBootstrap && typeof FirebaseBootstrap.getConfig === 'function') {
+        config = FirebaseBootstrap.getConfig(Boot);
+      } else if (firebaseBootstrapEnv) {
+        config = firebaseBootstrapEnv.config;
+      }
+    } catch (error) {
+      config = null;
+    }
     const projectId = config && typeof config.projectId === 'string' ? config.projectId : 'missing';
     const authDomain = config && typeof config.authDomain === 'string' ? config.authDomain : 'missing';
     const apiKey = config && typeof config.apiKey === 'string' ? config.apiKey : '';
@@ -101,35 +110,31 @@
     bootLog('CFG', message);
   };
 
-  const ensureFirebaseApp = () => {
-    if (NETWORK_DISABLED) {
-      throw new Error('Networking disabled by query flags.');
+  const firebaseNamespace = () => {
+    if (firebaseBootstrapEnv && firebaseBootstrapEnv.firebase) {
+      return firebaseBootstrapEnv.firebase;
     }
-    const firebase = firebaseNamespace();
-    if (!firebase) {
-      throw new Error('Firebase SDK failed to load.');
+    if (!FirebaseBootstrap || typeof FirebaseBootstrap.bootstrap !== 'function') {
+      return typeof global.firebase !== 'undefined' ? global.firebase : null;
     }
-    const config = getFirebaseConfig();
-    if (!config) {
-      throw new Error('Firebase configuration was not provided.');
+    try {
+      return ensureFirebaseEnv().firebase;
+    } catch (error) {
+      return typeof global.firebase !== 'undefined' ? global.firebase : null;
     }
-    if (!firebase.apps || firebase.apps.length === 0) {
-      firebase.initializeApp(config);
-    }
-    return firebase;
   };
 
   const ensureFirestore = () => {
     if (netState.firestore) {
       return netState.firestore;
     }
-    const firebase = ensureFirebaseApp();
-    if (typeof firebase.firestore !== 'function') {
+    const env = ensureFirebaseEnv();
+    const firestoreInstance = env && env.firestore ? env.firestore : null;
+    if (!firestoreInstance) {
       throw new Error('Firestore SDK is not available.');
     }
-    const firestoreInstance = firebase.firestore();
     netState.firestore = firestoreInstance;
-    netState.fieldValue = firebase.firestore.FieldValue || null;
+    netState.fieldValue = env.fieldValue || (env.firebase && env.firebase.firestore ? env.firebase.firestore.FieldValue : null);
     return firestoreInstance;
   };
 
@@ -145,15 +150,12 @@ function ensureAuth() {
   }
   if (_authInstance) return _authInstance;
 
-  const firebase = ensureFirebaseApp
-    ? ensureFirebaseApp()                   // your existing helper
-    : (window.firebase || firebaseNamespace && firebaseNamespace());
-
-  if (!firebase || typeof firebase.auth !== 'function') {
+  const env = ensureFirebaseEnv();
+  if (!env || !env.auth) {
     throw new Error('Firebase Auth SDK is not available.');
   }
 
-  _authInstance = firebase.auth();
+  _authInstance = env.auth;
   bootLog('AUTH', 'auth-instance-ready');
   return _authInstance;
 }
