@@ -5,6 +5,40 @@
     return /iphone|ipad|ipod|android|mobile/.test(ua);
   }
 
+  const detectPretendMobileFlag = (() => {
+    let cached = null;
+    const parseFlag = (value) => {
+      if (typeof value !== 'string') {
+        return false;
+      }
+      const normalized = value.trim().toLowerCase();
+      if (!normalized) {
+        return false;
+      }
+      return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+    };
+
+    return function detectPretendMobileFlag() {
+      if (cached !== null) {
+        return cached;
+      }
+      if (typeof window === 'undefined' || !window.location || typeof window.location.search !== 'string') {
+        cached = false;
+        return cached;
+      }
+
+      const search = window.location.search;
+      if (typeof URLSearchParams === 'function') {
+        const params = new URLSearchParams(search);
+        cached = parseFlag(params.get('pretendMobile'));
+        return cached;
+      }
+
+      cached = /[?&]pretendmobile=(1|true|yes|on)\b/i.test(search);
+      return cached;
+    };
+  })();
+
   const SPEED = 220;
   const ACCEL = 1200;
   const FRICTION = 1600;
@@ -16,7 +50,7 @@
   const CROUCH_SPEED_SCALE = 0.35;
   const JOY_OUTER_R_BASE = 92;
   const JOY_KNOB_R_BASE = Math.round(JOY_OUTER_R_BASE * 0.4);
-  const JOY_MOBILE_SCALE = isMobileUA() ? 0.7 : 1;
+  const JOY_MOBILE_SCALE = isMobileUA() || detectPretendMobileFlag() ? 0.7 : 1;
   const JOY_OUTER_R = Math.round(JOY_OUTER_R_BASE * JOY_MOBILE_SCALE);
   const JOY_KNOB_R = Math.round(JOY_KNOB_R_BASE * JOY_MOBILE_SCALE);
   const JOY_HIT_PADDING = 10;
@@ -107,32 +141,13 @@
     const x = Math.round((safeViewW - width) / 2);
     const y = Math.round((safeViewH - height) / 2);
 
-    let result = { x, y, w: Math.round(width), h: Math.round(height) };
-
-    if (isMobileUA()) {
-      const shrunk = shrinkRect(result, 0.3);
-      if (shrunk && typeof shrunk.w === 'number' && typeof shrunk.h === 'number') {
-        const centerX = shrunk.x + shrunk.w * 0.5;
-        const centerY = shrunk.y + shrunk.h * 0.5;
-        const width2 = Math.max(shrunk.w, MIN_LAYOUT_WIDTH);
-        const height2 = Math.max(shrunk.h, MIN_LAYOUT_HEIGHT);
-        result = {
-          x: Math.round(centerX - width2 * 0.5),
-          y: Math.round(centerY - height2 * 0.5),
-          w: Math.round(width2),
-          h: Math.round(height2),
-        };
-      } else {
-        result = {
-          x: Math.round(result.x),
-          y: Math.round(result.y),
-          w: Math.round(result.w),
-          h: Math.round(result.h),
-        };
-      }
-    }
-
-    return result;
+    const result = { x, y, w: Math.round(width), h: Math.round(height) };
+    return {
+      x: Math.round(result.x),
+      y: Math.round(result.y),
+      w: Math.round(result.w),
+      h: Math.round(result.h),
+    };
   }
 
   function clampToPlay(target, play) {
@@ -1015,6 +1030,7 @@
         margin: 28,
         joystickRadius: JOY_OUTER_R,
       };
+      this.mobileControlLayout = null;
       const nav = typeof navigator !== 'undefined' ? navigator : null;
       const win = typeof window !== 'undefined' ? window : null;
 
@@ -1024,6 +1040,7 @@
       this._forceKeyboard = false;
       this._joyDiagEnabled = false;
       this._joyDiagModes = this.getDefaultJoyDiagModes();
+      this._pretendMobile = detectPretendMobileFlag();
 
       this.playArea = { x: 0, y: 0, w: MIN_LAYOUT_WIDTH, h: MIN_LAYOUT_HEIGHT };
       this._playAreaPadOverride = null;
@@ -1054,6 +1071,9 @@
           const params = new URLSearchParams(searchString);
           this._forceJoystick = parseDebugFlag(params.get('forceJoystick'));
           this._forceKeyboard = parseDebugFlag(params.get('forceKeyboard'));
+          if (!this._pretendMobile) {
+            this._pretendMobile = parseDebugFlag(params.get('pretendMobile'));
+          }
 
           const playPadOverride = parsePlayPadOverride(params.get('playpad'));
           if (playPadOverride !== null) {
@@ -1079,6 +1099,9 @@
           const searchLower = searchString.toLowerCase();
           this._forceJoystick = /[?&]forcejoystick=(1|true|yes|on)\b/.test(searchLower);
           this._forceKeyboard = /[?&]forcekeyboard=(1|true|yes|on)\b/.test(searchLower);
+          if (!this._pretendMobile) {
+            this._pretendMobile = /[?&]pretendmobile=(1|true|yes|on)\b/.test(searchLower);
+          }
 
           const playPadMatch = searchString.match(/[?&]playpad=([^&#]*)/i);
           const playPadValue = playPadMatch ? decodeURIComponent(playPadMatch[1]) : null;
@@ -1961,12 +1984,24 @@
         typeof size.height === 'number' ? size.height : 0,
         MIN_LAYOUT_HEIGHT
       );
-      const play = computePlayArea(width, height, this._playAreaPadOverride);
+      const basePlay = computePlayArea(width, height, this._playAreaPadOverride);
+      let layout = null;
+      let play = basePlay;
+      if (this.shouldUseMobileLayout()) {
+        layout = this.computeMobileLayout(size, basePlay);
+        if (layout && layout.playArea) {
+          play = layout.playArea;
+        }
+      } else {
+        this.mobileControlLayout = null;
+      }
       this.playArea = play;
 
       if (this.diagnosticsActive()) {
         this.logJoyDiag('layout:playArea', {
           mobile: isMobileUA(),
+          pretendMobile: !!this._pretendMobile,
+          shouldUseMobileLayout: this.shouldUseMobileLayout(),
           scale: JOY_MOBILE_SCALE,
           play: {
             x: play ? play.x : null,
@@ -1974,12 +2009,23 @@
             w: play ? play.w : null,
             h: play ? play.h : null,
           },
+          gutters: layout ? layout.gutters : null,
+          controls: layout ? layout.controls : null,
           joystick: {
             outer: JOY_OUTER_R,
             knob: JOY_KNOB_R,
             hit: JOY_OUTER_R + JOY_HIT_PADDING,
           },
         });
+        if (layout) {
+          this.logJoyDiag('layout:controls', {
+            pretendMobile: !!this._pretendMobile,
+            shouldUseMobileLayout: this.shouldUseMobileLayout(),
+            gutters: layout.gutters,
+            controls: layout.controls,
+            hitRadii: layout.hitRadii,
+          });
+        }
       }
       this.physics.world.setBounds(play.x, play.y, play.w, play.h, true, true, true, true);
 
@@ -1991,6 +2037,7 @@
 
       this.updatePlayAreaBorder();
       this.updatePlayAreaDiagnostics(true);
+      this.positionTouchButtons();
     }
 
     clampFightersToPlayArea() {
@@ -2204,6 +2251,7 @@
       }
 
       this.updateSafeAreaInsets();
+      this.computeMobileLayout(size);
 
       (this._centeredElements || []).forEach((updatePosition) => updatePosition());
       this.positionTouchButtons();
@@ -3217,7 +3265,263 @@
       };
     }
 
+    shouldUseMobileLayout() {
+      return !!(this._pretendMobile || this._forceJoystick || isMobileUA());
+    }
+
+    computeMobileLayout(gameSize, basePlayArea) {
+      if (!this.shouldUseMobileLayout()) {
+        this.mobileControlLayout = null;
+        return null;
+      }
+
+      const size = gameSize || (this.scale ? this.scale.gameSize : null);
+      if (!size) {
+        this.mobileControlLayout = null;
+        return null;
+      }
+
+      const width = Math.max(typeof size.width === 'number' ? size.width : 0, MIN_LAYOUT_WIDTH);
+      const height = Math.max(typeof size.height === 'number' ? size.height : 0, MIN_LAYOUT_HEIGHT);
+      const safe = this.safeAreaInsets || { top: 0, right: 0, bottom: 0, left: 0 };
+      const layoutDefaults = this.touchButtonLayout || {};
+      const joystickRadius = Math.max(layoutDefaults.joystickRadius || JOY_OUTER_R, 0);
+      const buttonSize = Math.max(layoutDefaults.size || 0, 0);
+      const buttonGap = Math.max(layoutDefaults.gap || 0, 0);
+      const margin = Math.max(layoutDefaults.margin || 0, 0);
+
+      const joystickHitRadius = joystickRadius + JOY_HIT_PADDING;
+      const buttonHalf = buttonSize * 0.5;
+      const buttonHitRadius = buttonHalf + 20;
+      const buffer = Math.max(8, Math.round(Math.min(joystickHitRadius, buttonHitRadius) * 0.2));
+
+      const buttonSpacing = buttonSize + buttonGap;
+      const joystickY = height - safe.bottom - margin - joystickRadius;
+      const buttonsBaseY = height - safe.bottom - margin - buttonHalf;
+      const buttonOffset = buttonSpacing * 0.5;
+
+      const joystickCenters = {
+        p1: {
+          x: safe.left + margin + joystickRadius,
+          y: joystickY,
+        },
+        p2: {
+          x: width - safe.right - margin - joystickRadius,
+          y: joystickY,
+        },
+      };
+
+      const p1ButtonBaseX = joystickCenters.p1.x + joystickRadius + margin + buttonHalf;
+      const p2ButtonBaseX = joystickCenters.p2.x - joystickRadius - margin - buttonHalf;
+
+      const buttonCenters = {
+        p1: {
+          punch: { x: p1ButtonBaseX, y: buttonsBaseY - buttonOffset },
+          kick: { x: p1ButtonBaseX, y: buttonsBaseY + buttonOffset },
+        },
+        p2: {
+          punch: { x: p2ButtonBaseX, y: buttonsBaseY - buttonOffset },
+          kick: { x: p2ButtonBaseX, y: buttonsBaseY + buttonOffset },
+        },
+      };
+
+      const createBounds = (center, radiusX, radiusY = radiusX) => {
+        if (!center) {
+          return null;
+        }
+        const safeRadiusX = Math.max(radiusX || 0, 0);
+        const safeRadiusY = Math.max(radiusY || 0, 0);
+        return {
+          left: center.x - safeRadiusX,
+          right: center.x + safeRadiusX,
+          top: center.y - safeRadiusY,
+          bottom: center.y + safeRadiusY,
+        };
+      };
+
+      const mergeBounds = (list) => {
+        return list.reduce((acc, bounds) => {
+          if (!bounds) {
+            return acc;
+          }
+          if (!acc) {
+            return {
+              left: bounds.left,
+              right: bounds.right,
+              top: bounds.top,
+              bottom: bounds.bottom,
+            };
+          }
+          return {
+            left: Math.min(acc.left, bounds.left),
+            right: Math.max(acc.right, bounds.right),
+            top: Math.min(acc.top, bounds.top),
+            bottom: Math.max(acc.bottom, bounds.bottom),
+          };
+        }, null);
+      };
+
+      const leftBounds = mergeBounds([
+        createBounds(joystickCenters.p1, joystickHitRadius),
+        createBounds(buttonCenters.p1.punch, buttonHitRadius),
+        createBounds(buttonCenters.p1.kick, buttonHitRadius),
+      ]);
+      const rightBounds = mergeBounds([
+        createBounds(joystickCenters.p2, joystickHitRadius),
+        createBounds(buttonCenters.p2.punch, buttonHitRadius),
+        createBounds(buttonCenters.p2.kick, buttonHitRadius),
+      ]);
+      const allBounds = mergeBounds([
+        leftBounds,
+        rightBounds,
+      ]);
+
+      const safeLeft = Math.max(safe.left || 0, 0);
+      const safeRight = Math.max(safe.right || 0, 0);
+      const safeTop = Math.max(safe.top || 0, 0);
+      const safeBottom = Math.max(safe.bottom || 0, 0);
+
+      const leftEdge = leftBounds ? leftBounds.right : safeLeft;
+      const rightEdge = rightBounds ? rightBounds.left : width - safeRight;
+      const bottomTop = allBounds ? allBounds.top : height - safeBottom;
+
+      const gutters = {
+        left: Math.max(Math.round(leftEdge + buffer), safeLeft),
+        right: Math.max(Math.round(width - rightEdge + buffer), safeRight),
+        bottom: Math.max(Math.round(height - bottomTop + buffer), safeBottom),
+      };
+
+      const availableWidth = Math.max(width - gutters.left - gutters.right, MIN_LAYOUT_WIDTH);
+      const availableHeight = Math.max(height - gutters.bottom - safeTop, MIN_LAYOUT_HEIGHT);
+
+      const basePlay = basePlayArea || computePlayArea(width, height, this._playAreaPadOverride);
+      const shrunk = shrinkRect(basePlay, 0.08) || basePlay;
+
+      let targetWidth = Math.min(shrunk.w, availableWidth);
+      targetWidth = Math.max(targetWidth, MIN_LAYOUT_WIDTH);
+
+      let targetHeight = Math.min(shrunk.h, availableHeight);
+      targetHeight = Math.max(targetHeight, MIN_LAYOUT_HEIGHT);
+
+      const clamp = Phaser && Phaser.Math && typeof Phaser.Math.Clamp === 'function'
+        ? Phaser.Math.Clamp
+        : (value, min, max) => Math.min(Math.max(value, min), max);
+
+      const maxX = gutters.left + (availableWidth - targetWidth);
+      const maxY = safeTop + (availableHeight - targetHeight);
+
+      let targetX = clamp(shrunk.x, gutters.left, maxX);
+      let targetY = clamp(shrunk.y, safeTop, maxY);
+
+      if (!Number.isFinite(targetX)) {
+        targetX = gutters.left;
+      }
+      if (!Number.isFinite(targetY)) {
+        targetY = safeTop;
+      }
+
+      let resolvedPlay = {
+        x: Math.round(targetX),
+        y: Math.round(targetY),
+        w: Math.round(targetWidth),
+        h: Math.round(targetHeight),
+      };
+
+      const maxRight = width - gutters.right;
+      const maxBottom = height - gutters.bottom;
+      if (resolvedPlay.x + resolvedPlay.w > maxRight) {
+        resolvedPlay.x = Math.max(gutters.left, maxRight - resolvedPlay.w);
+      }
+      if (resolvedPlay.y + resolvedPlay.h > maxBottom) {
+        resolvedPlay.y = Math.max(safeTop, maxBottom - resolvedPlay.h);
+      }
+
+      resolvedPlay = {
+        x: Math.round(resolvedPlay.x),
+        y: Math.round(resolvedPlay.y),
+        w: Math.round(resolvedPlay.w),
+        h: Math.round(resolvedPlay.h),
+      };
+
+      const roundPoint = (point) =>
+        point
+          ? {
+              x: Math.round(point.x),
+              y: Math.round(point.y),
+            }
+          : null;
+
+      const controlCenters = {
+        joysticks: {
+          p1: roundPoint(joystickCenters.p1),
+          p2: roundPoint(joystickCenters.p2),
+        },
+        buttons: {
+          p1: {
+            punch: roundPoint(buttonCenters.p1.punch),
+            kick: roundPoint(buttonCenters.p1.kick),
+          },
+          p2: {
+            punch: roundPoint(buttonCenters.p2.punch),
+            kick: roundPoint(buttonCenters.p2.kick),
+          },
+        },
+      };
+
+      const layout = {
+        playArea: resolvedPlay,
+        gutters,
+        controls: controlCenters,
+        hitRadii: {
+          joystick: Math.round(joystickHitRadius),
+          button: Math.round(buttonHitRadius),
+        },
+        pretendMobile: !!this._pretendMobile,
+      };
+
+      this.mobileControlLayout = layout;
+      return layout;
+    }
+
     positionTouchButtons() {
+      const useMobileLayout = this.shouldUseMobileLayout();
+      const layout = useMobileLayout ? this.mobileControlLayout : null;
+      if (useMobileLayout && layout && layout.controls) {
+        const joysticks = layout.controls.joysticks || {};
+        const buttons = layout.controls.buttons || {};
+
+        const joystickP1 = this.virtualJoysticks.p1;
+        if (joystickP1 && joysticks.p1) {
+          joystickP1.setPosition(joysticks.p1.x, joysticks.p1.y);
+        }
+
+        const joystickP2 = this.virtualJoysticks.p2;
+        if (joystickP2 && joysticks.p2) {
+          joystickP2.setPosition(joysticks.p2.x, joysticks.p2.y);
+        }
+
+        const p1Buttons = buttons.p1 || {};
+        const p1Punch = this.touchButtons.p1.punch;
+        const p1Kick = this.touchButtons.p1.kick;
+        if (p1Punch && p1Buttons.punch) {
+          p1Punch.setPosition(p1Buttons.punch.x, p1Buttons.punch.y);
+        }
+        if (p1Kick && p1Buttons.kick) {
+          p1Kick.setPosition(p1Buttons.kick.x, p1Buttons.kick.y);
+        }
+
+        const p2Buttons = buttons.p2 || {};
+        const p2Punch = this.touchButtons.p2.punch;
+        const p2Kick = this.touchButtons.p2.kick;
+        if (p2Punch && p2Buttons.punch) {
+          p2Punch.setPosition(p2Buttons.punch.x, p2Buttons.punch.y);
+        }
+        if (p2Kick && p2Buttons.kick) {
+          p2Kick.setPosition(p2Buttons.kick.x, p2Buttons.kick.y);
+        }
+        return;
+      }
+
       const { width, height } = this.scale.gameSize;
       const { size, gap, margin, joystickRadius } = this.touchButtonLayout;
       const safe = this.safeAreaInsets || { top: 0, right: 0, bottom: 0, left: 0 };
