@@ -189,20 +189,32 @@ async function ensureSignedInUser() {
     throw new Error('Firebase Auth does not support anonymous sign-in.');
   }
 
-  bootLog('AUTH', 'sign-in-start');
-  _signInPromise = auth.signInAnonymously()
-    .catch((err) => {
-      // Clear so future attempts can retry.
-      _signInPromise = null;
-      bootLog('AUTH', 'sign-in-error', err);
-      throw err;
-    })
+  bootLog('AUTH', 'start');
+  _signInPromise = auth
+    .signInAnonymously()
     .then((cred) => {
       _signInPromise = null;
       const user = (cred && cred.user) || auth.currentUser;
       if (!user) throw new Error('Failed to sign in anonymously.');
-      bootLog('AUTH', 'sign-in-success', { uid: user.uid || null });
+      const uid = user.uid || 'missing';
+      bootLog('AUTH', `result code=ok uid=${uid}`);
       return user;
+    })
+    .catch((err) => {
+      _signInPromise = null;
+      const code = err && typeof err.code === 'string' ? err.code : 'unknown';
+      const rawMessage = err && typeof err.message === 'string' ? err.message : '';
+      const message = rawMessage || (err ? String(err) : 'Failed to sign in anonymously.');
+      bootLog('AUTH', `result code=${code} message=${message}`);
+      const combinedMessage = `Firebase Auth failed (code=${code}): ${message}`;
+      const authError = new Error(combinedMessage);
+      if (code && typeof code === 'string') {
+        authError.code = code;
+      }
+      if (Boot && typeof Boot.error === 'function') {
+        Boot.error(authError, 'AUTH');
+      }
+      throw authError;
     });
 
   const user = await _signInPromise;
