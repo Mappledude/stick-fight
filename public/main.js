@@ -200,7 +200,7 @@
     }
 
     handlePointerDown(pointer, eventType = 'pointerdown') {
-      return this.withDiagnostics(eventType, pointer, (ptr, pointerId) => {
+      return this.withDiagnostics(eventType, pointer, (ptr, pointerId, diag) => {
         if (!this.enabled) {
           return false;
         }
@@ -209,7 +209,7 @@
         }
         this.pointerId = pointerId;
         if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
-          this.scene.preventPointerDefault(ptr);
+          diag.preventDefault = this.scene.preventPointerDefault(ptr);
         }
         this.updateFromPointer(ptr);
         this.emit('joystickstart', this.vector);
@@ -218,7 +218,7 @@
     }
 
     handlePointerMove(pointer, eventType = 'pointermove') {
-      return this.withDiagnostics(eventType, pointer, (ptr, pointerId) => {
+      return this.withDiagnostics(eventType, pointer, (ptr, pointerId, diag) => {
         if (!this.enabled) {
           return false;
         }
@@ -226,7 +226,7 @@
           return false;
         }
         if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
-          this.scene.preventPointerDefault(ptr);
+          diag.preventDefault = this.scene.preventPointerDefault(ptr);
         }
         this.updateFromPointer(ptr);
         this.emit('joystickmove', this.vector);
@@ -235,12 +235,12 @@
     }
 
     handlePointerUp(pointer, eventType = 'pointerup') {
-      return this.withDiagnostics(eventType, pointer, (ptr, pointerId) => {
+      return this.withDiagnostics(eventType, pointer, (ptr, pointerId, diag) => {
         if (this.pointerId !== null && pointerId !== null && this.pointerId !== pointerId) {
           return false;
         }
         if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
-          this.scene.preventPointerDefault(ptr);
+          diag.preventDefault = this.scene.preventPointerDefault(ptr);
         }
         this.reset();
         this.emit('joystickend');
@@ -301,8 +301,9 @@
         ? { x: this.knob.x, y: this.knob.y }
         : { x: 0, y: 0 };
       const localDelta = diagnosticsActive ? this.getLocalPointerDelta(pointer) : null;
+      const diagContext = { preventDefault: null };
 
-      const result = handler(pointer, pointerId);
+      const result = handler(pointer, pointerId, diagContext);
 
       if (diagnosticsActive) {
         const newKnobPos = this.knob
@@ -313,13 +314,42 @@
           eventType,
           pointerId,
           local: localDelta,
+          pointer: this.extractPointerScreenPage(pointer),
           knob: { previous: prevKnobPos, next: newKnobPos },
           moved,
           result,
+          preventDefault: diagContext.preventDefault,
         });
       }
 
       return result;
+    }
+
+    extractPointerScreenPage(pointer) {
+      if (!pointer) {
+        return null;
+      }
+      const event = pointer.event || pointer.originalEvent || null;
+      const getCoord = (prop) => {
+        if (typeof pointer[prop] === 'number') {
+          return pointer[prop];
+        }
+        if (event && typeof event[prop] === 'number') {
+          return event[prop];
+        }
+        return null;
+      };
+      const screenX = getCoord('screenX');
+      const screenY = getCoord('screenY');
+      const pageX = getCoord('pageX');
+      const pageY = getCoord('pageY');
+      if (screenX === null && screenY === null && pageX === null && pageY === null) {
+        return null;
+      }
+      return {
+        screen: { x: screenX, y: screenY },
+        page: { x: pageX, y: pageY },
+      };
     }
 
     reset() {
@@ -1715,9 +1745,20 @@
 
     preventPointerDefault(pointer) {
       const event = pointer && (pointer.event || pointer.originalEvent);
-      if (event && typeof event.preventDefault === 'function' && event.cancelable !== false) {
+      const cancelable = !!(event && event.cancelable !== false);
+      const defaultPreventedBefore = !!(event && event.defaultPrevented);
+      let preventDefaultCalled = false;
+      if (cancelable && event && typeof event.preventDefault === 'function') {
         event.preventDefault();
+        preventDefaultCalled = true;
       }
+      const defaultPreventedAfter = !!(event && event.defaultPrevented);
+      return {
+        cancelable,
+        preventDefaultCalled,
+        defaultPreventedBefore,
+        defaultPreventedAfter,
+      };
     }
 
     positionTouchButtons() {
