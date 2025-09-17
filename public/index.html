@@ -47,56 +47,102 @@
         -webkit-user-select: none;
         user-select: none;
       }
+
+      #boot-overlay {
+        position: fixed;
+        z-index: 9999;
+        top: calc(var(--safe-area-inset-top) + 16px);
+        right: calc(var(--safe-area-inset-right) + 16px);
+        min-width: 240px;
+        max-width: min(360px, 90vw);
+        color: #fff;
+        font-family: 'Segoe UI', Roboto, sans-serif;
+        background: rgba(15, 15, 20, 0.88);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 12px;
+        padding: 12px 16px 16px 16px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+        backdrop-filter: blur(6px);
+        pointer-events: none;
+      }
+
+      #boot-overlay[hidden] {
+        display: none;
+      }
+
+      .boot-overlay__badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        background: rgba(0, 122, 255, 0.22);
+        border: 1px solid rgba(0, 122, 255, 0.5);
+      }
+
+      .boot-overlay__status {
+        list-style: none;
+        margin: 12px 0 0 0;
+        padding: 0;
+        display: grid;
+        gap: 6px;
+        font-size: 13px;
+        line-height: 1.45;
+        max-height: 200px;
+        overflow: hidden;
+      }
+
+      .boot-overlay__status-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        opacity: 0.88;
+      }
+
+      .boot-overlay__status-item::before {
+        content: '';
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        margin-top: 6px;
+        background: rgba(0, 168, 255, 0.9);
+        flex-shrink: 0;
+      }
+
+      .boot-overlay__status-item[data-boot-tag='ERROR']::before {
+        background: rgba(255, 77, 77, 0.95);
+      }
+
+      .boot-overlay__status-item em {
+        font-style: normal;
+        opacity: 0.65;
+        font-size: 11px;
+        display: inline-block;
+        margin-right: 4px;
+      }
+
+      .boot-overlay__error {
+        margin: 12px 0 0 0;
+        padding: 10px 12px;
+        border-radius: 10px;
+        font-size: 12px;
+        line-height: 1.4;
+        background: rgba(255, 56, 56, 0.15);
+        border: 1px solid rgba(255, 56, 56, 0.55);
+        color: #ffe1e1;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .boot-overlay__error[hidden] {
+        display: none;
+      }
     </style>
-    <script>
-      (function initFirebaseConfig(global) {
-        var config = Object.freeze({
-          apiKey: 'AIzaSyCTrS0i1Xz9Ll9cSPYnS3sh2g6Pfm7eNcQ',
-          authDomain: 'stick-fight-pigeon.firebaseapp.com',
-          projectId: 'stick-fight-pigeon',
-          storageBucket: 'stick-fight-pigeon.appspot.com',
-          messagingSenderId: '1035698723456',
-          appId: '1:1035698723456:web:13b6cf2b2a9f4e12a8c7b1',
-          measurementId: 'G-8X0PQR1XYZ',
-        });
-
-        global.__FIREBASE_CONFIG__ = config;
-        global.STICKFIGHT_FIREBASE_CONFIG = config;
-        global.STICK_FIGHT_FIREBASE_CONFIG = config;
-        global.STICKFIGHT_FIREBASE_OPTIONS = config;
-
-        var search = '';
-        try {
-          search = global.location && typeof global.location.search === 'string' ? global.location.search : '';
-        } catch (error) {
-          search = '';
-        }
-
-        var debugEnabled = false;
-        if (search) {
-          if (typeof URLSearchParams === 'function') {
-            try {
-              var params = new URLSearchParams(search);
-              debugEnabled = params.get('debug') === '1';
-            } catch (error) {
-              debugEnabled = /[?&]debug=1\b/.test(search);
-            }
-          } else {
-            debugEnabled = /[?&]debug=1\b/.test(search);
-          }
-        }
-
-        if (typeof console !== 'undefined' && console && typeof console.info === 'function') {
-          var message = '[StickFight] Firebase project ' + config.projectId;
-          if (debugEnabled) {
-            console.info(message, config);
-          } else {
-            console.info(message);
-          }
-        }
-      })(typeof window !== 'undefined' ? window : typeof globalThis !== 'undefined' ? globalThis : this);
-    </script>
-    <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
+    <script src="boot.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js" defer></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js" defer></script>
@@ -106,12 +152,13 @@
     <script src="net-server.js" defer></script>
     <script src="netplay.js" defer></script>
     <script src="main.js" defer></script>
-    <script src="joydiag-config.js" defer></script>
-    <script src="net.js" defer></script>
-    <script src="net-server.js" defer></script>
-    <script src="main.js" defer></script>
   </head>
   <body>
+    <div id="boot-overlay" hidden>
+      <div class="boot-overlay__badge" data-boot-badge>Booting…</div>
+      <ul class="boot-overlay__status" data-boot-status></ul>
+      <pre class="boot-overlay__error" data-boot-error hidden></pre>
+    </div>
     <div id="game-root"></div>
   </body>
 </html>

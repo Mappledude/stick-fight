@@ -1,6 +1,37 @@
 (function (global) {
   'use strict';
 
+  const Boot = (() => {
+    if (global && typeof global.__StickFightBoot === 'object') {
+      return global.__StickFightBoot;
+    }
+    const noop = () => undefined;
+    return {
+      flags: { debug: false, safe: false, nofs: false, nolobby: false },
+      log: noop,
+    };
+  })();
+
+  const bootLog = (tag, message, detail) => {
+    if (Boot && typeof Boot.log === 'function') {
+      Boot.log(tag, message, detail);
+    } else if (typeof console !== 'undefined' && console && typeof console.log === 'function') {
+      const label = '[' + tag + '] ' + message;
+      if (typeof detail !== 'undefined') {
+        console.log(label, detail);
+      } else {
+        console.log(label);
+      }
+    }
+  };
+
+  const bootFlags = Boot && Boot.flags ? Boot.flags : { debug: false, safe: false, nofs: false, nolobby: false };
+  const NETWORK_DISABLED = !!(bootFlags.safe || bootFlags.nolobby);
+
+  if (NETWORK_DISABLED) {
+    bootLog('ROUTE', 'net-module-disabled', { safe: bootFlags.safe, nolobby: bootFlags.nolobby });
+  }
+
   const netState = {
     initialized: false,
     firestore: null,
@@ -35,6 +66,9 @@
   };
 
   const ensureFirebaseApp = () => {
+    if (NETWORK_DISABLED) {
+      throw new Error('Networking disabled by query flags.');
+    }
     const firebase = firebaseNamespace();
     if (!firebase) {
       throw new Error('Firebase SDK failed to load.');
@@ -69,6 +103,9 @@ let _signInPromise = null;
 
 /** Return the firebase.auth() singleton, initializing Firebase app if needed. */
 function ensureAuth() {
+  if (NETWORK_DISABLED) {
+    throw new Error('Networking disabled by query flags.');
+  }
   if (_authInstance) return _authInstance;
 
   const firebase = ensureFirebaseApp
@@ -80,6 +117,7 @@ function ensureAuth() {
   }
 
   _authInstance = firebase.auth();
+  bootLog('AUTH', 'auth-instance-ready');
   return _authInstance;
 }
 
@@ -93,6 +131,7 @@ async function ensureSignedInUser() {
 
   // Already signed in?
   if (auth.currentUser) {
+    bootLog('AUTH', 'current-user', { uid: auth.currentUser.uid || null });
     return { auth, user: auth.currentUser };
   }
 
@@ -102,6 +141,7 @@ async function ensureSignedInUser() {
     if (!auth.currentUser) {
       throw new Error('Anonymous sign-in finished but no currentUser present.');
     }
+    bootLog('AUTH', 'sign-in-shared');
     return { auth, user: auth.currentUser };
   }
 
@@ -110,16 +150,19 @@ async function ensureSignedInUser() {
     throw new Error('Firebase Auth does not support anonymous sign-in.');
   }
 
+  bootLog('AUTH', 'sign-in-start');
   _signInPromise = auth.signInAnonymously()
     .catch((err) => {
       // Clear so future attempts can retry.
       _signInPromise = null;
+      bootLog('AUTH', 'sign-in-error', err);
       throw err;
     })
     .then((cred) => {
       _signInPromise = null;
       const user = (cred && cred.user) || auth.currentUser;
       if (!user) throw new Error('Failed to sign in anonymously.');
+      bootLog('AUTH', 'sign-in-success', { uid: user.uid || null });
       return user;
     });
 
@@ -745,7 +788,9 @@ function ensureAuthReady() {
     }
   };
 
-  initWhenReady();
+  if (!NETWORK_DISABLED) {
+    initWhenReady();
+  }
 
   global.StickFightNet = Object.assign(namespace, {
     state: netState,

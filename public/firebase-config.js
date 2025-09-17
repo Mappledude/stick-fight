@@ -15,6 +15,22 @@
     measurementId: 'G-8X0PQR1XYZ',
   });
 
+  const boot = global.__StickFightBoot;
+  const apiKey = config.apiKey || '';
+  const apiKeyLen = typeof apiKey === 'string' ? apiKey.length : 0;
+  const apiKeyHead = apiKeyLen >= 4 ? apiKey.slice(0, 4) : apiKey;
+  const payload =
+    'projectId=' + config.projectId +
+    ' apiKeyLen=' + apiKeyLen +
+    ' apiKeyHead=' + apiKeyHead +
+    ' source=window';
+  if (boot && typeof boot.log === 'function') {
+    boot.log('CFG', payload);
+  } else if (typeof console !== 'undefined' && console && typeof console.info === 'function') {
+    console.info('[CFG] ' + payload);
+  }
+
+  global.__FIREBASE_CONFIG__ = config;
   global.STICKFIGHT_FIREBASE_CONFIG = config;
   global.STICK_FIGHT_FIREBASE_CONFIG = config;
   global.STICKFIGHT_FIREBASE_OPTIONS = config;
