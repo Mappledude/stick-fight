@@ -1211,6 +1211,31 @@
         this.logJoyDiag('joytest', 'Simulated joystick input active');
       }
 
+      const createPlayerAssertionState = () => ({
+        pointerActive: false,
+        pointerEngaged: false,
+        moveObserved: false,
+        velocityChanged: false,
+        baselineVelocityX: null,
+        velocitySampled: false,
+        velocitySamples: 0,
+        lastVelocityX: null,
+      });
+
+      const resetPlayerAssertionState = (state) => {
+        if (!state) {
+          return;
+        }
+        state.pointerActive = false;
+        state.pointerEngaged = false;
+        state.moveObserved = false;
+        state.velocityChanged = false;
+        state.baselineVelocityX = null;
+        state.velocitySampled = false;
+        state.velocitySamples = 0;
+        state.lastVelocityX = null;
+      };
+
       const now = this.time && typeof this.time.now === 'number' ? this.time.now : Date.now();
       if (!this._joyTestSimState) {
         this._joyTestSimState = {
@@ -1224,10 +1249,24 @@
             { release: true },
             { normX: -0.75, normY: 0.35, mirrorX: true },
           ],
+          assertion: {
+            players: {
+              p1: createPlayerAssertionState(),
+              p2: createPlayerAssertionState(),
+            },
+          },
         };
       }
 
       const state = this._joyTestSimState;
+      if (!state.assertion) {
+        state.assertion = {
+          players: {
+            p1: createPlayerAssertionState(),
+            p2: createPlayerAssertionState(),
+          },
+        };
+      }
       if (now < state.nextTick) {
         return;
       }
@@ -1237,12 +1276,16 @@
       const step = state.sequence[state.stepIndex];
 
       const players = ['p1', 'p2'];
+      const fighters = Array.isArray(this._fighters) ? this._fighters : [];
       for (let i = 0; i < players.length; i += 1) {
         const player = players[i];
         const joystick = this.virtualJoysticks[player];
         if (!joystick || !joystick.isEnabled()) {
           continue;
         }
+
+        const playerAssertion = state.assertion.players[player] || createPlayerAssertionState();
+        state.assertion.players[player] = playerAssertion;
 
         let pointer = state.pointerByPlayer[player];
         if (!pointer) {
@@ -1263,6 +1306,7 @@
           if (joystick.pointerId !== null) {
             joystick.handlePointerUp(pointer, 'joytest:release');
           }
+          playerAssertion.pointerActive = false;
           continue;
         }
 
@@ -1283,9 +1327,100 @@
         applyPointerPosition(targetNormX, targetNormY);
 
         if (joystick.pointerId === null) {
+          resetPlayerAssertionState(playerAssertion);
+          playerAssertion.pointerActive = true;
+          playerAssertion.pointerEngaged = true;
+          const fighter = fighters[i];
+          const body = fighter && fighter.body && fighter.body.velocity ? fighter.body : null;
+          if (body && typeof body.velocity.x === 'number') {
+            playerAssertion.baselineVelocityX = body.velocity.x;
+            playerAssertion.lastVelocityX = body.velocity.x;
+            playerAssertion.velocitySampled = true;
+            playerAssertion.velocitySamples = 1;
+          }
           joystick.handlePointerDown(pointer, 'joytest:down');
         }
+        playerAssertion.pointerActive = true;
         joystick.handlePointerMove(pointer, 'joytest:move');
+
+        if (playerAssertion.pointerActive) {
+          const inputState = player === 'p2' ? this.p2Input : this.p1Input;
+          if (
+            inputState &&
+            typeof inputState.moveX === 'number' &&
+            Math.abs(inputState.moveX) > 0.001
+          ) {
+            playerAssertion.moveObserved = true;
+          }
+
+          const fighter = fighters[i];
+          const body = fighter && fighter.body && fighter.body.velocity ? fighter.body : null;
+          if (body && typeof body.velocity.x === 'number') {
+            if (!playerAssertion.velocitySampled) {
+              playerAssertion.baselineVelocityX = body.velocity.x;
+              playerAssertion.lastVelocityX = body.velocity.x;
+              playerAssertion.velocitySampled = true;
+              playerAssertion.velocitySamples = 1;
+            } else {
+              playerAssertion.velocitySamples += 1;
+              playerAssertion.lastVelocityX = body.velocity.x;
+            }
+            if (!playerAssertion.velocityChanged) {
+              const diff = Math.abs(
+                body.velocity.x - (playerAssertion.baselineVelocityX || 0)
+              );
+              if (diff > 0.001) {
+                playerAssertion.velocityChanged = true;
+              }
+            }
+          }
+        }
+      }
+
+      if (step.release) {
+        const report = { players: {} };
+        let success = true;
+        for (let index = 0; index < players.length; index += 1) {
+          const player = players[index];
+          const assertion = state.assertion.players[player];
+          if (!assertion) {
+            continue;
+          }
+
+          const engaged = !!assertion.pointerEngaged;
+          const moveObserved = !!assertion.moveObserved;
+          const velocityChanged = !!assertion.velocityChanged;
+          const velocitySamples = assertion.velocitySamples || 0;
+          const baselineVelocityX = assertion.baselineVelocityX;
+          const lastVelocityX = assertion.lastVelocityX;
+
+          report.players[player] = {
+            engaged,
+            moveObserved,
+            velocityChanged,
+            velocitySamples,
+            baselineVelocityX,
+            lastVelocityX,
+          };
+
+          if (engaged) {
+            if (!moveObserved) {
+              success = false;
+              this.logJoyDiag('joytest:assert', `PIPELINE BREAK: mapping (${player})`);
+            } else if (!velocityChanged) {
+              success = false;
+              const detail = velocitySamples > 1 ? '' : ' (no velocity update)';
+              this.logJoyDiag('joytest:assert', `PIPELINE BREAK: movement (${player})${detail}`);
+            }
+          }
+
+          resetPlayerAssertionState(assertion);
+        }
+
+        this.logJoyDiag('joytest:assert', {
+          success,
+          players: report.players,
+        });
       }
     }
 
