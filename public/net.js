@@ -48,6 +48,7 @@
     overlay: null,
     panel: null,
     isAdmin: false,
+    claims: null,
   };
 
   const lobbyRoomsState = {
@@ -135,6 +136,7 @@
 // --- Auth bootstrap (namespaced Firebase v8 style) ---------------------------
 let _authInstance = null;
 let _signInPromise = null;
+let _adminCheckPromise = null;
 
 /** Return the firebase.auth() singleton, initializing Firebase app if needed. */
 function ensureAuth() {
@@ -209,6 +211,78 @@ async function ensureSignedInUser() {
 function ensureAuthReady() {
   return ensureSignedInUser().then(() => undefined);
 }
+
+  const ADMIN_CLAIM_KEYS = ['admin', 'stickfightAdmin'];
+
+  const claimsContainAdmin = (claims) => {
+    if (!claims || typeof claims !== 'object') {
+      return false;
+    }
+    for (let i = 0; i < ADMIN_CLAIM_KEYS.length; i += 1) {
+      const key = ADMIN_CLAIM_KEYS[i];
+      if (claims[key] === true) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const ensureAdminPrivileges = async (options) => {
+    const opts = options || {};
+    const forceRefresh = !!opts.forceRefresh;
+    if (_adminCheckPromise && !forceRefresh) {
+      try {
+        const result = await _adminCheckPromise;
+        if (result && claimsContainAdmin(result.claims)) {
+          return result;
+        }
+      } catch (error) {
+        // ignore cached failure and retry below
+      }
+    }
+
+    const { auth, user } = await ensureSignedInUser();
+    const currentUser = user || (auth && auth.currentUser);
+    if (!currentUser || !currentUser.uid) {
+      throw new Error('Unable to determine the authenticated user.');
+    }
+
+    const fetchClaims = async (refresh) => {
+      try {
+        return await currentUser.getIdTokenResult(refresh);
+      } catch (error) {
+        if (refresh) {
+          throw error;
+        }
+        return currentUser.getIdTokenResult(true);
+      }
+    };
+
+    _adminCheckPromise = Promise.resolve()
+      .then(() => fetchClaims(forceRefresh))
+      .then((tokenResult) => {
+        if (!tokenResult) {
+          throw new Error('Failed to verify admin privileges.');
+        }
+        const claims = tokenResult.claims || {};
+        overlayState.claims = claims;
+        if (!claimsContainAdmin(claims)) {
+          const error = new Error(
+            'Admin privileges are required. Ask the project owner to grant the admin custom claim.'
+          );
+          error.code = 'auth/not-admin';
+          error.claims = claims;
+          throw error;
+        }
+        return { auth, user: currentUser, claims };
+      })
+      .catch((error) => {
+        overlayState.claims = (error && error.claims) || overlayState.claims || null;
+        throw error;
+      });
+
+    return _adminCheckPromise;
+  };
 
   const namespace = global.StickFightNet || {};
 
@@ -493,12 +567,11 @@ function ensureAuthReady() {
 
   const adminCreateRoom = async () => {
     logConfigScope('admin-create-room');
-    const { auth, user } = await ensureSignedInUser();
-    const currentUser = user || (auth && auth.currentUser);
-    if (!currentUser || !currentUser.uid) {
-      throw new Error('Unable to determine the authenticated user.');
+    const { user } = await ensureAdminPrivileges();
+    if (!user || !user.uid) {
+      throw new Error('Admin privileges are required.');
     }
-    const record = await createRoomRecord({ hostUid: currentUser.uid, hostName: 'Admin' });
+    const record = await createRoomRecord({ hostUid: user.uid, hostName: 'Admin' });
     return {
       roomId: record.roomId,
       hostPeerId: record.hostPeerId,
@@ -511,6 +584,7 @@ function ensureAuthReady() {
     if (!trimmed) {
       throw new Error('Room code is required.');
     }
+    await ensureAdminPrivileges();
     const firestore = ensureFirestore();
     const roomRef = firestore.collection('rooms').doc(trimmed);
     const snapshot = await roomRef.get();
@@ -522,6 +596,7 @@ function ensureAuthReady() {
   };
 
   const adminDeleteAllRooms = async () => {
+    await ensureAdminPrivileges();
     const firestore = ensureFirestore();
     const roomsSnapshot = await firestore.collection('rooms').get();
     const docs = roomsSnapshot.docs || [];
@@ -652,20 +727,30 @@ function ensureAuthReady() {
     }
   };
 
-  const handleAdminEntry = () => {
+  const handleAdminEntry = async () => {
     logConfigScope('admin-handle-entry');
     if (overlayState.isAdmin) {
       renderAdminPanel();
       return;
     }
     const promptFn = typeof window !== 'undefined' && typeof window.prompt === 'function' ? window.prompt : null;
+    const alertFn = typeof window !== 'undefined' && typeof window.alert === 'function' ? window.alert : null;
     const code = promptFn ? promptFn('Enter admin code') : null;
     if (code === '808080') {
-      overlayState.isAdmin = true;
-      logMessage('[ADMIN]', 'entered');
-      renderAdminPanel();
+      try {
+        await ensureAdminPrivileges({ forceRefresh: true });
+        overlayState.isAdmin = true;
+        logMessage('[ADMIN]', 'entered');
+        renderAdminPanel();
+      } catch (error) {
+        overlayState.isAdmin = false;
+        const message = error && error.message ? error.message : 'Failed to verify admin access.';
+        logMessage('[ADMIN]', 'entry-denied', error);
+        if (alertFn) {
+          alertFn(message);
+        }
+      }
     } else if (code && code.trim()) {
-      const alertFn = typeof window !== 'undefined' && typeof window.alert === 'function' ? window.alert : null;
       if (alertFn) {
         alertFn('Invalid admin code.');
       }

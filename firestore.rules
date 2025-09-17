@@ -1,14 +1,118 @@
-// One-player-per-device per uid per room
+// Firestore security rules for Stick Fight
 rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
-    match /rooms/{roomId}/players/{uid} {
-      allow read: if true;
-      allow create, update: if request.auth != null
-        && request.auth.uid == uid
-        && (!exists(/databases/$(db)/documents/rooms/$(roomId)/players/$(uid))
-            || request.resource.data.deviceId == resource.data.deviceId);
-      allow delete: if request.auth != null && request.auth.uid == uid;
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        (request.auth.token.admin == true || request.auth.token.stickfightAdmin == true);
+    }
+
+    function playerDocBefore(roomId, uid) {
+      return get(/databases/$(db)/documents/rooms/$(roomId)/players/$(uid));
+    }
+
+    function playerDocAfter(roomId, uid) {
+      return getAfter(/databases/$(db)/documents/rooms/$(roomId)/players/$(uid));
+    }
+
+    function isRoomMember(roomId) {
+      return isSignedIn() &&
+        (request.auth.uid != null ? playerDocAfter(roomId, request.auth.uid).exists : false);
+    }
+
+    function ownsSignal(roomId, peerId) {
+      return isSignedIn() && request.auth.uid != null &&
+        (let player = playerDocAfter(roomId, request.auth.uid);
+          player.exists && player.data.peerId == peerId);
+    }
+
+    function roomWriteHasOnlyAllowedFields() {
+      return request.resource.data.keys().hasOnly([
+        'code',
+        'active',
+        'status',
+        'createdAt',
+        'updatedAt',
+        'lastActivityAt',
+        'maxPlayers',
+        'hostPeerId',
+        'hostUid',
+        'playerCount'
+      ]);
+    }
+
+    function roomUpdateHasOnlyAllowedChanges() {
+      return resource.data.diff(request.resource.data).changedKeys().hasOnly([
+        'updatedAt',
+        'lastActivityAt',
+        'playerCount',
+        'hostPeerId',
+        'status',
+        'active',
+        'maxPlayers'
+      ]);
+    }
+
+    function signalWriteHasOnlyAllowedFields() {
+      return request.resource.data.keys().hasOnly([
+        'role',
+        'offer',
+        'answer',
+        'ice',
+        'updatedAt'
+      ]);
+    }
+
+    match /rooms/{roomId} {
+      allow read: if isSignedIn() || isAdmin();
+
+      allow create: if isSignedIn() &&
+        roomWriteHasOnlyAllowedFields() &&
+        request.resource.data.code == roomId &&
+        request.resource.data.hostUid == request.auth.uid;
+
+      allow update: if roomWriteHasOnlyAllowedFields() &&
+        request.resource.data.code == roomId &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.hostUid == resource.data.hostUid &&
+        (
+          isAdmin() ||
+          (isRoomMember(roomId) && roomUpdateHasOnlyAllowedChanges())
+        );
+
+      allow delete: if isAdmin() ||
+        (isSignedIn() && resource.data.hostUid == request.auth.uid);
+
+      match /players/{uid} {
+        allow read: if true;
+
+        allow create, update: if (
+            isSignedIn() &&
+            request.auth.uid == uid &&
+            request.resource.data.uid == uid &&
+            (
+              !playerDocBefore(roomId, uid).exists ||
+              playerDocBefore(roomId, uid).data.deviceId == request.resource.data.deviceId
+            )
+          ) || isAdmin();
+
+        allow delete: if (isSignedIn() && request.auth.uid == uid) || isAdmin();
+      }
+
+      match /signals/{peerId} {
+        allow read: if isAdmin() || isRoomMember(roomId);
+
+        allow create, update: if (
+            isAdmin() ||
+            (isRoomMember(roomId) && ownsSignal(roomId, peerId))
+          ) && signalWriteHasOnlyAllowedFields();
+
+        allow delete: if isAdmin() || (isRoomMember(roomId) && ownsSignal(roomId, peerId));
+      }
     }
   }
 }
