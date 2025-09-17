@@ -2956,8 +2956,6 @@ this.teardownNetworking && this.teardownNetworking();
         netdiag: this._netDiagEnabled,
       });
 
-      });
-
       this.signaling = signaling;
       signaling.start();
       if (session.isHost) {
