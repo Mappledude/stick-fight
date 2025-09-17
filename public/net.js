@@ -50,6 +50,11 @@
     isAdmin: false,
     claims: null,
     adminOverride: false,
+    fatalError: false,
+    fatalMessage: null,
+    pendingFatalMessage: null,
+    contentLocked: false,
+    overlayInitRequested: false,
   };
 
   const lobbyRoomsState = {
@@ -162,6 +167,38 @@
     return firestoreInstance;
   };
 
+  const ensureKeyVerification = async () => {
+    if (!FirebaseBootstrap || typeof FirebaseBootstrap.verifyKey !== 'function') {
+      return;
+    }
+    try {
+      await FirebaseBootstrap.verifyKey(Boot);
+    } catch (error) {
+      let status = null;
+      try {
+        status =
+          typeof FirebaseBootstrap.getKeyCheckStatus === 'function'
+            ? FirebaseBootstrap.getKeyCheckStatus(Boot)
+            : null;
+      } catch (statusError) {
+        status = null;
+      }
+      const detailMessage =
+        (status && status.error && typeof status.error.message === 'string' && status.error.message) ||
+        (error && typeof error.message === 'string' ? error.message : 'API key verification failed.');
+      const banner = '[KEY][ERR] ' + detailMessage;
+      renderKeyVerificationError(banner);
+      if (Boot && typeof Boot.error === 'function') {
+        try {
+          Boot.error(error, 'KEY');
+        } catch (bootError) {
+          // Ignore Boot.error failures.
+        }
+      }
+      throw error;
+    }
+  };
+
 // --- Auth bootstrap (namespaced Firebase v8 style) ---------------------------
 let _authInstance = null;
 let _signInPromise = null;
@@ -198,6 +235,7 @@ function ensureAuth() {
  * - Resolves with { auth, user }.
  */
 async function ensureSignedInUser() {
+  await ensureKeyVerification();
   const auth = ensureAuth();
 
   // Already signed in?
@@ -821,7 +859,12 @@ function ensureAuthReady() {
   };
 
   const renderAdminPanel = () => {
+    if (overlayState.fatalError) {
+      showOverlay();
+      return;
+    }
     showOverlay();
+    overlayState.contentLocked = false;
     renderContent(`
       <h2>Admin Controls</h2>
       <p>Manage rooms for debugging and moderation. Be careful—deletions are permanent.</p>
@@ -1125,6 +1168,23 @@ function ensureAuthReady() {
     if (overlayState.overlay || typeof document === 'undefined') {
       return;
     }
+    if (!document.body) {
+      if (!overlayState.overlayInitRequested && typeof document.addEventListener === 'function') {
+        overlayState.overlayInitRequested = true;
+        document.addEventListener(
+          'DOMContentLoaded',
+          () => {
+            overlayState.overlayInitRequested = false;
+            ensureOverlay();
+            if (overlayState.pendingFatalMessage) {
+              renderKeyVerificationError(overlayState.pendingFatalMessage);
+            }
+          },
+          { once: true }
+        );
+      }
+      return;
+    }
     const overlay = document.createElement('div');
     overlay.className = 'stickfight-lobby-overlay stickfight-hidden';
     const panel = document.createElement('div');
@@ -1133,17 +1193,64 @@ function ensureAuthReady() {
     document.body.appendChild(overlay);
     overlayState.overlay = overlay;
     overlayState.panel = panel;
+    if (overlayState.pendingFatalMessage) {
+      renderKeyVerificationError(overlayState.pendingFatalMessage);
+    }
   };
 
-  const renderContent = (html) => {
+  const renderContent = (html, options) => {
     if (!overlayState.panel) {
       return;
     }
+    const opts = options || {};
+    if (overlayState.contentLocked && !opts.force) {
+      return;
+    }
     overlayState.panel.innerHTML = html;
+    if (!opts.force) {
+      overlayState.contentLocked = false;
+    }
   };
 
-  const renderCreateLobby = () => {
+  function renderKeyVerificationError(message) {
+    const fallbackMessage = '[KEY][ERR] Firebase API key verification failed.';
+    const effectiveMessage =
+      typeof message === 'string' && message
+        ? message
+        : overlayState.fatalMessage || overlayState.pendingFatalMessage || fallbackMessage;
+    overlayState.fatalError = true;
+    overlayState.fatalMessage = effectiveMessage;
+    overlayState.pendingFatalMessage = effectiveMessage;
+    overlayState.contentLocked = true;
+
+    createStyles();
+    ensureOverlay();
+
+    if (!overlayState.overlay) {
+      return;
+    }
+
+    const safeMessage = escapeHtml(effectiveMessage);
     showOverlay();
+    renderContent(
+      `
+      <h2>Configuration Error</h2>
+      <div class="stickfight-lobby-error" style="margin-bottom: 16px;">${safeMessage}</div>
+      <p>Stick Fight online features are unavailable because the Firebase API key does not match the configured project.</p>
+      <p>Please verify the API key for project <strong>stick-fight-pigeon</strong> and reload the page.</p>
+    `,
+      { force: true }
+    );
+    overlayState.pendingFatalMessage = null;
+  }
+
+  const renderCreateLobby = () => {
+    if (overlayState.fatalError) {
+      showOverlay();
+      return;
+    }
+    showOverlay();
+    overlayState.contentLocked = false;
     renderContent(`
       <h2>Host a Lobby</h2>
       <p>Create a room and share the invite link with your friends.</p>
@@ -1193,9 +1300,14 @@ function ensureAuthReady() {
   };
 
   const renderHostShare = (result) => {
+    if (overlayState.fatalError) {
+      showOverlay();
+      return;
+    }
     const shareUrl = result && result.shareUrl ? result.shareUrl : '';
     const roomId = result && result.roomId ? result.roomId : '';
     const name = result && result.name ? result.name : '';
+    overlayState.contentLocked = false;
     renderContent(`
       <h2>Lobby Ready</h2>
       <p>${escapeHtml(name || 'Host')}, share this link so your friends can join your room.</p>
@@ -1270,7 +1382,12 @@ function ensureAuthReady() {
   };
 
   const renderJoinForm = (roomId) => {
+    if (overlayState.fatalError) {
+      showOverlay();
+      return;
+    }
     showOverlay();
+    overlayState.contentLocked = false;
     renderContent(`
       <h2>Join Lobby</h2>
       <p>Enter a nickname to join room <strong>${escapeHtml(roomId)}</strong>.</p>
@@ -1320,7 +1437,12 @@ function ensureAuthReady() {
   };
 
   const renderJoinSuccess = (result) => {
+    if (overlayState.fatalError) {
+      showOverlay();
+      return;
+    }
     const playerName = result && result.name ? result.name : 'Player';
+    overlayState.contentLocked = false;
     renderContent(`
       <h2>Ready to Fight</h2>
       <p>${escapeHtml(playerName)}, you have joined the lobby. Waiting for the host to start the match!</p>
@@ -1339,7 +1461,12 @@ function ensureAuthReady() {
   };
 
   const renderInvalidRoom = () => {
+    if (overlayState.fatalError) {
+      showOverlay();
+      return;
+    }
     showOverlay();
+    overlayState.contentLocked = false;
     renderContent(`
       <h2>Invalid Link</h2>
       <p>The lobby link you followed is missing or invalid. You can create a new game to get started.</p>
@@ -1361,6 +1488,10 @@ function ensureAuthReady() {
   };
 
   const initializeOverlayFlow = () => {
+    if (overlayState.fatalError) {
+      renderKeyVerificationError();
+      return;
+    }
     createStyles();
     ensureOverlay();
     startLobbyRoomsListener();
@@ -1381,7 +1512,9 @@ function ensureAuthReady() {
       roomId = match ? decodeURIComponent(match[1]) : '';
     }
     const safeRoomId = sanitizeRoomId(roomId);
-    if (safeRoomId) {
+    if (overlayState.fatalError) {
+      renderKeyVerificationError();
+    } else if (safeRoomId) {
       renderJoinForm(safeRoomId);
     } else if (roomId) {
       renderInvalidRoom();
