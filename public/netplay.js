@@ -25,6 +25,7 @@
     connections: new Map(),
     peerInputs: {},
     remotePlayers: [],
+    tick: 0,
 // Netplay runtime fields (merged)
 this.registry = (typeof this.registry !== 'undefined') ? this.registry : null;        // from main
 this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remotePlayArea : null;  // from 4d
@@ -34,6 +35,7 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
     lastStateBroadcastAt: null,
     lastStateReceivedAt: null,
     lastStateTimestamp: null,
+    lastStateTick: null,
     lastSnapshotLatencyMs: null,
     diagTimer: null,
     unsubPlayers: null,
@@ -234,6 +236,8 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
 
     registry.fixedStep(dt);
 
+    runtime.tick = (runtime.tick + 1) >>> 0;
+
     const snapshot = registry.getPlayers();
     runtime.remotePlayers = snapshot
       .filter((player) => player && player.id !== runtime.localPeerId)
@@ -408,6 +412,8 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
     runtime.roomId = net.state.roomId;
     runtime.localSlot = net.state.isHost ? 'p1' : 'p2';
     runtime.slotAssignments = {};
+    runtime.tick = 0;
+    runtime.lastStateTick = null;
     if (net.state.isHost) {
       runtime.slotAssignments.p1 = runtime.localPeerId;
     } else {
@@ -826,7 +832,7 @@ if (
           h: Number.isFinite(playArea.h) ? playArea.h : 0,
         }
       : null;
-    return { players, play };
+    return { players, play, tick: runtime.tick };
   }
 
   function broadcastHostState() {
@@ -836,7 +842,7 @@ if (
       return;
     }
     const now = nowMs();
-    const message = { t: Math.floor(Date.now()), players, play: snapshot.play };
+    const message = { t: Math.floor(Date.now()), tick: runtime.tick, players, play: snapshot.play };
     const serialized = serializeJSON(message);
     if (!serialized) {
       return;
@@ -1052,6 +1058,8 @@ if (
       if (!payload || !Array.isArray(payload.players)) {
         return;
       }
+      const tickValue = Number.isFinite(payload.tick) ? payload.tick : null;
+
       const sanitizedPlayers = payload.players
         .map((player) => {
           if (!player || typeof player !== 'object') {
@@ -1082,6 +1090,7 @@ if (
       connection.lastStateReceivedAt = now;
       const timestamp = typeof payload.t === 'number' ? payload.t : null;
       runtime.lastStateTimestamp = timestamp;
+      runtime.lastStateTick = tickValue;
       runtime.lastSnapshotLatencyMs = Number.isFinite(timestamp) ? Math.max(Date.now() - timestamp, 0) : null;
       const playArea = payload.play;
       runtime.remotePlayArea =
@@ -1216,10 +1225,12 @@ if (
       runtime.serverStepTimer = null;
     }
     runtime.registry = null;
+    runtime.tick = 0;
     runtime.remotePlayers = [];
     runtime.remotePlayArea = null;
     runtime.peerInputs = {};
     runtime.lastStateTimestamp = null;
+    runtime.lastStateTick = null;
     runtime.lastSnapshotLatencyMs = null;
     updateDiagnosticsOverlay();
   }
