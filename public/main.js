@@ -1009,7 +1009,6 @@
 
       this._fighters = [p1, p2];
     }
-    }
 
     registerTouchPrevention() {
       const canvas = this.sys.game.canvas;
