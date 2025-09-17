@@ -21,94 +21,6 @@
 
   Boot.milestone('main-script');
 
-  const FirebaseBootstrap = (() => {
-    const scope = typeof window !== 'undefined' ? window : typeof globalThis !== 'undefined' ? globalThis : {};
-    if (scope && typeof scope.__StickFightFirebaseBootstrap === 'object') {
-      return scope.__StickFightFirebaseBootstrap;
-    }
-    return null;
-  })();
-
-  const FIREBASE_ENV = Boot.guard('config-ready', () => {
-    const logDiagnostic = (tag, message) => {
-      if (Boot && typeof Boot.log === 'function') {
-        Boot.log(tag, message);
-      }
-      if (!Boot || Boot.version !== 1) {
-        if (typeof console !== 'undefined' && console && typeof console.info === 'function') {
-          console.info('[' + tag + '] ' + message);
-        }
-      }
-    };
-
-    const showConfigFailure = (reason, detail) => {
-      const message = detail ? reason + ' ' + detail : reason;
-      if (Boot && typeof Boot.ensureOverlay === 'function') {
-        Boot.ensureOverlay();
-      }
-      logDiagnostic('CFG', '[ERR] ' + reason);
-      if (detail) {
-        logDiagnostic('CFG', detail);
-      }
-      if (Boot && typeof Boot.error === 'function') {
-        Boot.error(new Error(message), 'CFG');
-      }
-      if (typeof console !== 'undefined' && console && typeof console.error === 'function') {
-        console.error('[CFG][ERR] ' + message);
-      }
-
-      const sw = typeof navigator !== 'undefined' && navigator && navigator.serviceWorker ? navigator.serviceWorker : null;
-      if (sw && sw.ready && typeof sw.ready.then === 'function') {
-        sw.ready
-          .then((registration) => {
-            if (registration && typeof registration.update === 'function') {
-              logDiagnostic('CFG', 'retry: requested service worker update');
-              return registration.update();
-            }
-            return null;
-          })
-          .catch(() => undefined);
-      }
-
-      logDiagnostic('CFG', 'hint: Shift+Reload to bypass stale service worker');
-
-      if (typeof document !== 'undefined' && document && typeof document.getElementById === 'function') {
-        const banner = document.getElementById('boot-overlay');
-        if (banner && banner.hasAttribute('hidden')) {
-          banner.removeAttribute('hidden');
-        }
-      }
-
-      return null;
-    };
-
-    if (!FirebaseBootstrap || typeof FirebaseBootstrap.bootstrap !== 'function') {
-      return showConfigFailure('missing firebase bootstrap helper');
-    }
-
-    try {
-      return FirebaseBootstrap.bootstrap(Boot);
-    } catch (error) {
-      const detail = error && error.message ? error.message : String(error);
-      return showConfigFailure('firebase bootstrap failed', detail);
-    }
-  });
-
-  if (!FIREBASE_ENV) {
-    if (Boot && typeof Boot.log === 'function') {
-      Boot.log('BOOT', 'config guard aborted');
-    }
-    if (!Boot || Boot.version !== 1) {
-      if (typeof console !== 'undefined' && console && typeof console.warn === 'function') {
-        console.warn('[BOOT] config guard aborted');
-      }
-    }
-    return;
-  }
-
-  const BOOT_FLAGS = Boot && Boot.flags ? Boot.flags : { debug: false, safe: false, nofs: false, nolobby: false };
-  Boot.milestone('boot-flags');
-
   const bootLog = (tag, message, detail) => {
     if (Boot && typeof Boot.log === 'function') {
       Boot.log(tag, message, detail);
@@ -122,6 +34,9 @@
     }
   };
 
+  const BOOT_FLAGS = Boot && Boot.flags ? Boot.flags : { debug: false, safe: false, nofs: false, nolobby: false };
+  Boot.milestone('boot-flags');
+
   const SAFE_MODE = !!BOOT_FLAGS.safe;
   const NO_FULLSCREEN = !!BOOT_FLAGS.nofs;
   const NO_LOBBY = !!BOOT_FLAGS.nolobby;
@@ -132,6 +47,104 @@
     safe: SAFE_MODE,
     nolobby: NO_LOBBY,
   });
+
+  const FirebaseBootstrap = (() => {
+    const scope = typeof window !== 'undefined' ? window : typeof globalThis !== 'undefined' ? globalThis : {};
+    if (scope && typeof scope.__StickFightFirebaseBootstrap === 'object') {
+      return scope.__StickFightFirebaseBootstrap;
+    }
+    return null;
+  })();
+
+  let FIREBASE_ENV = null;
+
+  if (SAFE_MODE) {
+    bootLog('ROUTE', 'safe-mode', { placeholder: true });
+    Boot.milestone('config-safe-skip');
+  } else {
+    FIREBASE_ENV = Boot.guard('config-ready', () => {
+      const logDiagnostic = (tag, message) => {
+        if (Boot && typeof Boot.log === 'function') {
+          Boot.log(tag, message);
+        }
+        if (!Boot || Boot.version !== 1) {
+          if (typeof console !== 'undefined' && console && typeof console.info === 'function') {
+            console.info('[' + tag + '] ' + message);
+          }
+        }
+      };
+
+      const showConfigFailure = (reason, detail) => {
+        const message = detail ? reason + ' ' + detail : reason;
+        if (Boot && typeof Boot.ensureOverlay === 'function') {
+          Boot.ensureOverlay();
+        }
+        logDiagnostic('CFG', '[ERR] ' + reason);
+        if (detail) {
+          logDiagnostic('CFG', detail);
+        }
+        if (Boot && typeof Boot.error === 'function') {
+          Boot.error(new Error(message), 'CFG');
+        }
+        if (typeof console !== 'undefined' && console && typeof console.error === 'function') {
+          console.error('[CFG][ERR] ' + message);
+        }
+
+        const sw = typeof navigator !== 'undefined' && navigator && navigator.serviceWorker ? navigator.serviceWorker : null;
+        if (sw && sw.ready && typeof sw.ready.then === 'function') {
+          sw.ready
+            .then((registration) => {
+              if (registration && typeof registration.update === 'function') {
+                logDiagnostic('CFG', 'retry: requested service worker update');
+                return registration.update();
+              }
+              return null;
+            })
+            .catch(() => undefined);
+        }
+
+        logDiagnostic('CFG', 'hint: Shift+Reload to bypass stale service worker');
+
+        if (typeof document !== 'undefined' && document && typeof document.getElementById === 'function') {
+          const banner = document.getElementById('boot-overlay');
+          if (banner && banner.hasAttribute('hidden')) {
+            banner.removeAttribute('hidden');
+          }
+        }
+
+        return null;
+      };
+
+      if (!FirebaseBootstrap || typeof FirebaseBootstrap.bootstrap !== 'function') {
+        return showConfigFailure('missing firebase bootstrap helper');
+      }
+
+      try {
+        return FirebaseBootstrap.bootstrap(Boot);
+      } catch (error) {
+        const detail = error && error.message ? error.message : String(error);
+        return showConfigFailure('firebase bootstrap failed', detail);
+      }
+    });
+  }
+
+  if (SAFE_MODE) {
+    Boot.milestone('safe-mode-placeholder');
+    bootLog('BOOT', 'safe-mode placeholder ready');
+    return;
+  }
+
+  if (!FIREBASE_ENV) {
+    if (Boot && typeof Boot.log === 'function') {
+      Boot.log('BOOT', 'config guard aborted');
+    }
+    if (!Boot || Boot.version !== 1) {
+      if (typeof console !== 'undefined' && console && typeof console.warn === 'function') {
+        console.warn('[BOOT] config guard aborted');
+      }
+    }
+    return;
+  }
 
   function isMobileUA() {
     var ua = (navigator && navigator.userAgent) ? navigator.userAgent : '';
