@@ -101,6 +101,120 @@
     });
   };
 
+  const readQueryParam = (scope, name) => {
+    if (!isObject(scope) || typeof name !== 'string' || !name) {
+      return null;
+    }
+
+    let search = '';
+    try {
+      const location = scope.location;
+      if (location && typeof location.search === 'string') {
+        search = location.search;
+      }
+    } catch (error) {
+      return null;
+    }
+
+    if (typeof search !== 'string' || search === '') {
+      return null;
+    }
+
+    let text = search.charAt(0) === '?' ? search.slice(1) : search;
+    if (!text) {
+      return null;
+    }
+
+    const pairs = text.split('&');
+    for (let i = 0; i < pairs.length; i += 1) {
+      const part = pairs[i];
+      if (!part) {
+        continue;
+      }
+
+      const eqIndex = part.indexOf('=');
+      const rawKey = eqIndex >= 0 ? part.slice(0, eqIndex) : part;
+      const rawValue = eqIndex >= 0 ? part.slice(eqIndex + 1) : '';
+
+      let decodedKey = rawKey;
+      try {
+        decodedKey = decodeURIComponent(rawKey.replace(/\+/g, ' '));
+      } catch (error) {
+        decodedKey = rawKey.replace(/\+/g, ' ');
+      }
+
+      if (decodedKey !== name) {
+        continue;
+      }
+
+      try {
+        return decodeURIComponent(rawValue.replace(/\+/g, ' '));
+      } catch (error) {
+        return rawValue.replace(/\+/g, ' ');
+      }
+    }
+
+    return null;
+  };
+
+  const readQueryFlag = (scope, name, truthyValues) => {
+    const value = readQueryParam(scope, name);
+    if (typeof value !== 'string') {
+      return false;
+    }
+
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+
+    const allowed = Array.isArray(truthyValues) && truthyValues.length > 0 ? truthyValues : ['1', 'true', 'yes', 'on'];
+    return allowed.indexOf(normalized) >= 0;
+  };
+
+  const isSafeModeEnabled = (scope, loggers) => {
+    const boot = loggers && loggers.boot;
+    const bootFlags = boot && isObject(boot.flags) ? boot.flags : null;
+    if (bootFlags && bootFlags.safe) {
+      return true;
+    }
+
+    return readQueryFlag(scope, 'safe');
+  };
+
+  const shouldAllowInlineConfig = (scope) => {
+    return readQueryFlag(scope, 'useInline', ['1']);
+  };
+
+  const readFirebaseInitOptions = (scope) => {
+    if (!isObject(scope)) {
+      return null;
+    }
+
+    const firebase = scope.firebase;
+    if (!isObject(firebase)) {
+      return null;
+    }
+
+    const apps = firebase.apps;
+    if (!apps) {
+      return null;
+    }
+
+    let firstApp = null;
+    if (Array.isArray(apps) && apps.length > 0) {
+      firstApp = apps[0];
+    } else if (typeof apps === 'object' && apps) {
+      firstApp = apps[0] || null;
+    }
+
+    if (!isObject(firstApp) || !isObject(firstApp.options)) {
+      return null;
+    }
+
+    return firstApp.options;
+  };
+
   const tryReadGlobalFirebaseConfig = (scope) => {
     if (!isObject(scope)) {
       return null;
@@ -117,25 +231,44 @@
   };
 
   const resolveFirebaseConfig = (scope, inlineConfig, loggers) => {
+    const safeMode = isSafeModeEnabled(scope, loggers);
+    const allowInline = shouldAllowInlineConfig(scope);
+
+    const firebaseInitOptions = readFirebaseInitOptions(scope);
+    if (firebaseInitOptions) {
+      try {
+        const normalizedFirebaseInit = normalizeFirebaseConfig(firebaseInitOptions, 'firebase-init', loggers);
+        return { config: normalizedFirebaseInit, source: 'firebase-init' };
+      } catch (error) {
+        // Fall back to other sources on validation failure.
+      }
+    }
+
     const windowConfig = tryReadGlobalFirebaseConfig(scope);
     if (windowConfig && windowConfig.value) {
       try {
         const normalizedWindow = normalizeFirebaseConfig(windowConfig.value, 'window', loggers);
         return { config: normalizedWindow, source: 'window', key: windowConfig.key };
       } catch (error) {
-        if (!inlineConfig) {
+        if (!(allowInline && inlineConfig)) {
           throw error;
         }
       }
     }
 
-    if (!inlineConfig) {
-      logError(loggers, 'missing=inline-config source=inline');
-      throw new Error('CFG_MISSING_INLINE_CONFIG');
+    if (allowInline && inlineConfig) {
+      const normalizedInline = normalizeFirebaseConfig(inlineConfig, 'inline', loggers);
+      return { config: normalizedInline, source: 'inline' };
     }
 
-    const normalizedInline = normalizeFirebaseConfig(inlineConfig, 'inline', loggers);
-    return { config: normalizedInline, source: 'inline' };
+    logInfo(loggers, 'source=none');
+
+    if (!safeMode) {
+      logError(loggers, 'missing=config source=none');
+      throw new Error('CFG_MISSING_FIREBASE_CONFIG');
+    }
+
+    return { config: null, source: 'none' };
   };
 
   const bootstrap = (scope) => {
@@ -148,12 +281,19 @@
       console: typeof console !== 'undefined' && console ? console : undefined,
     };
 
-    const { config, source } = resolveFirebaseConfig(scope, INLINE_CONFIG, loggers);
+    const result = resolveFirebaseConfig(scope, INLINE_CONFIG, loggers);
+    const resolvedSource = result && result.source ? result.source : 'none';
+    const config = result ? result.config : null;
+
+    if (!config) {
+      return null;
+    }
+
     const apiKeyLen = config.apiKey.length;
     const apiKeyHead = config.apiKey.slice(0, 6);
     const logDetails =
       'source=' +
-      source +
+      resolvedSource +
       ' projectId=' +
       config.projectId +
       ' authDomain=' +
