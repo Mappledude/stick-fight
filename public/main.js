@@ -1,4 +1,52 @@
 (function () {
+  const Boot = (() => {
+    if (typeof window !== 'undefined' && window.__StickFightBoot) {
+      return window.__StickFightBoot;
+    }
+    const noop = () => undefined;
+    return {
+      flags: { debug: false, safe: false, nofs: false, nolobby: false },
+      milestone: noop,
+      log: noop,
+      error: noop,
+      ready: noop,
+      guard(step, fn) {
+        if (typeof fn === 'function') {
+          return fn();
+        }
+        return undefined;
+      },
+    };
+  })();
+
+  Boot.milestone('main-script');
+  const BOOT_FLAGS = Boot && Boot.flags ? Boot.flags : { debug: false, safe: false, nofs: false, nolobby: false };
+  Boot.milestone('boot-flags');
+
+  const bootLog = (tag, message, detail) => {
+    if (Boot && typeof Boot.log === 'function') {
+      Boot.log(tag, message, detail);
+    } else if (typeof console !== 'undefined' && console && typeof console.log === 'function') {
+      const label = '[' + tag + '] ' + message;
+      if (typeof detail !== 'undefined') {
+        console.log(label, detail);
+      } else {
+        console.log(label);
+      }
+    }
+  };
+
+  const SAFE_MODE = !!BOOT_FLAGS.safe;
+  const NO_FULLSCREEN = !!BOOT_FLAGS.nofs;
+  const NO_LOBBY = !!BOOT_FLAGS.nolobby;
+  const NETWORK_ENABLED = !SAFE_MODE && !NO_LOBBY;
+
+  Boot.milestone('net-config');
+  bootLog('ROUTE', NETWORK_ENABLED ? 'network-enabled' : 'network-disabled', {
+    safe: SAFE_MODE,
+    nolobby: NO_LOBBY,
+  });
+
   function isMobileUA() {
     var ua = (navigator && navigator.userAgent) ? navigator.userAgent : '';
     ua = ua.toLowerCase();
@@ -124,6 +172,14 @@
       assignParam('hostPeerId', hostPeerMatch ? decodeURIComponent(hostPeerMatch[1]) : null);
     }
 
+    bootLog('ROUTE', 'net-query', {
+      enabled: NETWORK_ENABLED,
+      netdiag: result.netdiag,
+      room: result.room,
+      peer: result.peer,
+      role: result.role,
+    });
+
     return result;
   })();
 
@@ -169,8 +225,17 @@
     let failed = false;
     let firestoreInstance = null;
     let fieldValue = null;
+    const firebaseDisabled = SAFE_MODE || NO_LOBBY;
+
+    if (firebaseDisabled) {
+      bootLog('INIT', 'firebase-disabled', { reason: SAFE_MODE ? 'safe-mode' : 'nolobby' });
+    }
 
     const ensureApp = () => {
+      if (firebaseDisabled) {
+        failed = true;
+        return false;
+      }
       if (failed) {
         return false;
       }
@@ -182,6 +247,7 @@
         return false;
       }
       try {
+        bootLog('INIT', 'firebase-initialize');
         if (!firebase.apps || firebase.apps.length === 0) {
           const config =
             typeof window !== 'undefined' && window && window.STICKFIGHT_FIREBASE_CONFIG
@@ -199,10 +265,12 @@
         firestoreInstance = typeof firebase.firestore === 'function' ? firebase.firestore() : null;
         fieldValue = firebase.firestore ? firebase.firestore.FieldValue : null;
         initialized = true;
+        bootLog('INIT', 'firebase-ready');
         return !!firestoreInstance;
       } catch (error) {
         failed = true;
         console.error('[StickFight] Firebase init failed', error);
+        bootLog('INIT', 'firebase-error', error);
         return false;
       }
     };
@@ -2778,11 +2846,15 @@ this.netOverlay = (typeof this.netOverlay !== 'undefined') ? this.netOverlay : n
       this.waitForValidSize(() => this.initWorldAndSpawn());
 
       if (
+        NETWORK_ENABLED &&
         typeof window !== 'undefined' &&
         window.StickFightNetplay &&
         typeof window.StickFightNetplay.attachScene === 'function'
       ) {
         window.StickFightNetplay.attachScene(this);
+        bootLog('ROUTE', 'scene-hooks-prepared', { enabled: true });
+      } else if (!NETWORK_ENABLED) {
+        bootLog('ROUTE', 'netplay-skipped', { reason: SAFE_MODE ? 'safe-mode' : 'nolobby' });
       }
 
       const pointerDownHandler = (pointer) => {
@@ -2811,14 +2883,17 @@ this.netOverlay = (typeof this.netOverlay !== 'undefined') ? this.netOverlay : n
         }
       };
       this.input.on('pointerdown', pointerDownHandler);
-      this.setupNetworking();
+      if (NETWORK_ENABLED && typeof this.setupNetworking === 'function') {
+        this.setupNetworking();
+      }
       this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
         this.input.off('pointerdown', pointerDownHandler);
 // --- scene/net teardown on shutdown ---
 this.destroyNetDiagOverlay && this.destroyNetDiagOverlay();
 this.clearRemotePlayerLabels && this.clearRemotePlayerLabels();
 
-if (typeof window !== 'undefined' &&
+if (NETWORK_ENABLED &&
+    typeof window !== 'undefined' &&
     window.StickFightNetplay &&
     typeof window.StickFightNetplay.detachScene === 'function') {
   window.StickFightNetplay.detachScene(this);
@@ -2917,6 +2992,12 @@ this.teardownNetworking && this.teardownNetworking();
 
     // --- Networking setup (keep from main) ---
     setupNetworking() {
+      if (!NETWORK_ENABLED) {
+        if (this._netDiagEnabled) {
+          netDiagLog('setup:disabled', { reason: 'flags' });
+        }
+        return;
+      }
       const session = this.resolveNetSession();
       if (!session.roomId || !session.peerId) {
         if (this._netDiagEnabled) {
@@ -5693,6 +5774,14 @@ if (typeof this.positionNetDiagOverlay === 'function') {
     }
   };
 
+  const scaleConfig = {
+    mode: Phaser.Scale.RESIZE,
+    autoCenter: Phaser.Scale.CENTER_BOTH,
+  };
+  if (!NO_FULLSCREEN) {
+    scaleConfig.fullscreenTarget = 'game-root';
+  }
+
   const config = {
     type: determineRendererType(),
     parent: 'game-root',
@@ -5704,18 +5793,45 @@ if (typeof this.positionNetDiagOverlay === 'function') {
         debug: false,
       },
     },
-    scale: {
-      mode: Phaser.Scale.RESIZE,
-      autoCenter: Phaser.Scale.CENTER_BOTH,
-    },
+    scale: scaleConfig,
     scene: [MainScene],
   };
 
-  window.addEventListener('load', () => {
-    const game = new Phaser.Game(config);
+  Boot.milestone('phaser-configured');
 
-    window.addEventListener('resize', () => {
-      game.scale.resize(window.innerWidth, window.innerHeight);
+  const startGame = () =>
+    Boot.guard('game-start', () => {
+      Boot.milestone('dom-ready');
+      const game = new Phaser.Game(config);
+      Boot.milestone('phaser-created');
+
+      const resizeHandler = () => {
+        if (!game || !game.scale) {
+          return;
+        }
+        game.scale.resize(window.innerWidth, window.innerHeight);
+      };
+
+      window.addEventListener('resize', resizeHandler);
+      Boot.milestone('resize-hooked');
+
+      Boot.milestone('boot-complete');
+      Boot.ready('Running');
+      return game;
     });
-  });
+
+  const runWhenReady = () => {
+    startGame();
+  };
+
+  Boot.milestone('dom-listener');
+  if (typeof document !== 'undefined' && document && document.readyState) {
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      runWhenReady();
+    } else {
+      window.addEventListener('load', runWhenReady, { once: true });
+    }
+  } else {
+    window.addEventListener('load', runWhenReady, { once: true });
+  }
 })();
