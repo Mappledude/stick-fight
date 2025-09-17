@@ -316,6 +316,9 @@
       this.peerEntries = {};
       this.playerPeerIdsByUid = {};
       this.stopped = false;
+      this.authUid = typeof opts.uid === 'string' ? opts.uid : null;
+      this.localDeviceId = typeof opts.deviceId === 'string' ? opts.deviceId : null;
+      this.selfPlayerUnsub = null;
     }
 
     getRoomRef() {
@@ -340,6 +343,7 @@
       this.started = true;
       this.stopped = false;
       this.ensureOwnSignalDoc();
+      this.subscribeToOwnPlayer();
     }
 
     ensureOwnSignalDoc() {
@@ -366,6 +370,46 @@
         });
     }
 
+    subscribeToOwnPlayer() {
+      if (this.selfPlayerUnsub || !this.authUid) {
+        return;
+      }
+      const roomRef = this.getRoomRef();
+      if (!roomRef || typeof roomRef.collection !== 'function') {
+        return;
+      }
+      const docRef = roomRef.collection('players').doc(this.authUid);
+      if (!docRef || typeof docRef.onSnapshot !== 'function') {
+        return;
+      }
+      this.selfPlayerUnsub = docRef.onSnapshot((doc) => {
+        if (!this.scene || typeof this.scene.onDeviceOwnershipChanged !== 'function') {
+          return;
+        }
+        if (!doc || !doc.exists) {
+          this.scene.onDeviceOwnershipChanged({
+            allowed: true,
+            uid: this.authUid,
+            deviceId: this.localDeviceId || null,
+            docDeviceId: null,
+            snapshot: null,
+          });
+          return;
+        }
+        const data = (typeof doc.data === 'function' ? doc.data() : {}) || {};
+        const docDeviceId = typeof data.deviceId === 'string' ? data.deviceId : null;
+        const allowed =
+          !docDeviceId || !this.localDeviceId || docDeviceId === this.localDeviceId;
+        this.scene.onDeviceOwnershipChanged({
+          allowed,
+          uid: this.authUid,
+          deviceId: this.localDeviceId || null,
+          docDeviceId,
+          snapshot: data,
+        });
+      });
+    }
+
     stop() {
       if (this.stopped) {
         return;
@@ -379,6 +423,10 @@
       if (this.roomUnsub) {
         this.roomUnsub();
         this.roomUnsub = null;
+      }
+      if (this.selfPlayerUnsub) {
+        this.selfPlayerUnsub();
+        this.selfPlayerUnsub = null;
       }
       const keys = Object.keys(this.signalUnsubs);
       for (let i = 0; i < keys.length; i += 1) {
@@ -2009,6 +2057,12 @@
       this.virtualJoysticks = { p1: null, p2: null };
       this.touchButtonsList = [];
       this.joystickList = [];
+      this.controlsMounted = false;
+      this.deviceControlsAllowed = !NETWORK_ENABLED;
+      this.deviceLockUid = null;
+      this.deviceLockDocDeviceId = null;
+      this.localDeviceId = null;
+      this._spectatorModal = null;
       this.touchButtonLayout = {
         size: 80,
         gap: 18,
@@ -2828,10 +2882,9 @@ this.netOverlay = (typeof this.netOverlay !== 'undefined') ? this.netOverlay : n
       }
 
       this.registerTouchPrevention();
-      this.createTouchControls();
+      this.refreshTouchControls('scene-create');
       this.registerKeyboardControls();
       this.createDebugOverlay();
-      this.logTouchControlsCreationDiagnostics();
 
       if (this.diagnosticsActive()) {
         this.ensureJoyDiagHudVisible();
@@ -2892,6 +2945,9 @@ this.netOverlay = (typeof this.netOverlay !== 'undefined') ? this.netOverlay : n
 this.destroyNetDiagOverlay && this.destroyNetDiagOverlay();
 this.clearRemotePlayerLabels && this.clearRemotePlayerLabels();
 
+        this.destroyTouchControls('scene-shutdown');
+        this.hideSpectatorModal();
+
 if (NETWORK_ENABLED &&
     typeof window !== 'undefined' &&
     window.StickFightNetplay &&
@@ -2911,6 +2967,8 @@ this.teardownNetworking && this.teardownNetworking();
         peerId: null,
         isHost: false,
         hostPeerId: null,
+        uid: null,
+        deviceId: null,
       };
 
       const win = typeof window !== 'undefined' ? window : null;
@@ -2929,6 +2987,13 @@ this.teardownNetworking && this.teardownNetworking();
 
       const applySession = (source) => {
         if (!source) return;
+        if (
+          source.state &&
+          source.state !== source &&
+          typeof source.state === 'object'
+        ) {
+          applySession(source.state);
+        }
         if (typeof source.roomId === 'string' && source.roomId.length > 0) {
           session.roomId = session.roomId || source.roomId;
         }
@@ -2943,6 +3008,12 @@ this.teardownNetworking && this.teardownNetworking();
         }
         if (!session.isHost && typeof source.role === 'string') {
           session.isHost = source.role === 'host';
+        }
+        if (typeof source.uid === 'string' && source.uid.length > 0) {
+          session.uid = session.uid || source.uid;
+        }
+        if (typeof source.deviceId === 'string' && source.deviceId.length > 0) {
+          session.deviceId = session.deviceId || source.deviceId;
         }
       };
 
@@ -2991,7 +3062,7 @@ this.teardownNetworking && this.teardownNetworking();
     }
 
     // --- Networking setup (keep from main) ---
-    setupNetworking() {
+    async setupNetworking() {
       if (!NETWORK_ENABLED) {
         if (this._netDiagEnabled) {
           netDiagLog('setup:disabled', { reason: 'flags' });
@@ -3015,12 +3086,80 @@ this.teardownNetworking && this.teardownNetworking();
         return;
       }
 
+      const netApi = typeof window !== 'undefined' ? window.StickFightNet : null;
+      let authResult = null;
+      if (netApi && typeof netApi.ensureSignedInUser === 'function') {
+        try {
+          authResult = await netApi.ensureSignedInUser();
+        } catch (error) {
+          if (typeof console !== 'undefined' && console && typeof console.error === 'function') {
+            console.error('[AUTH] ensureSignedInUser failed', error);
+          }
+        }
+      }
+      const user = authResult && authResult.user ? authResult.user : null;
+      const uid = user && typeof user.uid === 'string' ? user.uid : null;
+      const deviceId =
+        netApi && typeof netApi.getDeviceId === 'function' ? netApi.getDeviceId() : null;
+
+      if (typeof console !== 'undefined' && console && typeof console.log === 'function') {
+        console.log(`[AUTH] uid=${uid || 'unknown'} deviceId=${deviceId || 'unknown'}`);
+      }
+
+      this.deviceLockUid = uid;
+      this.localDeviceId = deviceId;
+
+      if (uid && !session.uid) {
+        session.uid = uid;
+      }
+      if (deviceId && !session.deviceId) {
+        session.deviceId = deviceId;
+      }
+
+      const roomRef = db.collection('rooms').doc(session.roomId);
+      let ownershipHandled = false;
+      if (uid && roomRef && typeof roomRef.collection === 'function') {
+        try {
+          const playerDoc = await roomRef.collection('players').doc(uid).get();
+          const data = playerDoc && playerDoc.exists ? playerDoc.data() || {} : null;
+          const docDeviceId =
+            data && typeof data.deviceId === 'string' ? data.deviceId : null;
+          const allowed =
+            !docDeviceId || !deviceId || docDeviceId === deviceId;
+          if (typeof this.onDeviceOwnershipChanged === 'function') {
+            this.onDeviceOwnershipChanged({
+              allowed,
+              uid,
+              deviceId,
+              docDeviceId,
+              snapshot: data,
+            });
+          }
+          ownershipHandled = true;
+        } catch (error) {
+          if (typeof console !== 'undefined' && console && typeof console.warn === 'function') {
+            console.warn('[AUTH] device-check-failed', error);
+          }
+        }
+      }
+      if (!ownershipHandled && typeof this.onDeviceOwnershipChanged === 'function') {
+        this.onDeviceOwnershipChanged({
+          allowed: true,
+          uid,
+          deviceId,
+          docDeviceId: null,
+          snapshot: null,
+        });
+      }
+
       this.createNetState(session.isHost ? 'host' : 'guest');
       if (this.net) {
         this.net.roomId = session.roomId;
         this.net.peerId = session.peerId;
         this.net.peerInputs = {};
         this.net.players = {};
+        this.net.uid = session.uid || uid || null;
+        this.net.deviceId = session.deviceId || deviceId || null;
       }
       if (session.isHost && typeof this.onNetPeerJoined === 'function') {
         this.onNetPeerJoined(session.peerId, { isLocal: true });
@@ -3035,6 +3174,8 @@ this.teardownNetworking && this.teardownNetworking();
         hostPeerId: session.hostPeerId,
         scene: this,
         netdiag: this._netDiagEnabled,
+        uid: session.uid || uid || null,
+        deviceId: session.deviceId || deviceId || null,
       });
 
       this.signaling = signaling;
@@ -3047,6 +3188,53 @@ this.teardownNetworking && this.teardownNetworking();
       }
       this.createNetOverlay();
       this.updateNetOverlay();
+    }
+
+    onDeviceOwnershipChanged(payload) {
+      const allowed = payload && payload.allowed !== false;
+      const previousAllowed = this.deviceControlsAllowed;
+      if (payload && typeof payload.uid === 'string') {
+        this.deviceLockUid = payload.uid;
+      }
+      if (payload && typeof payload.deviceId === 'string') {
+        this.localDeviceId = payload.deviceId;
+      }
+      this.deviceLockDocDeviceId =
+        payload && typeof payload.docDeviceId === 'string' ? payload.docDeviceId : null;
+      this.deviceControlsAllowed = allowed;
+
+      if (
+        !allowed &&
+        typeof console !== 'undefined' &&
+        console &&
+        typeof console.warn === 'function'
+      ) {
+        console.warn('[CONTROLS] spectator-mode', {
+          uid: this.deviceLockUid || null,
+          deviceId: this.localDeviceId || null,
+          docDeviceId: this.deviceLockDocDeviceId,
+        });
+      }
+
+      const shouldRefresh =
+        previousAllowed !== allowed ||
+        (allowed && !this.controlsMounted) ||
+        (!allowed && this.controlsMounted);
+
+      if (shouldRefresh) {
+        this.refreshTouchControls('device-lock-change');
+      }
+
+      if (allowed) {
+        this.hideSpectatorModal();
+      } else {
+        this.showSpectatorModal({
+          allowed,
+          uid: this.deviceLockUid,
+          deviceId: this.localDeviceId,
+          docDeviceId: this.deviceLockDocDeviceId,
+        });
+      }
     }
 
     teardownNetworking() {
@@ -3562,6 +3750,7 @@ if (typeof this.positionNetDiagOverlay === 'function') {
 } else if (typeof this.positionNetOverlay === 'function') {
   this.positionNetOverlay();
 }
+      this.updateSpectatorModalLayout();
 
       if (this._layoutReady) {
         this.refreshWorldBounds(size);
@@ -4384,10 +4573,89 @@ if (typeof this.positionNetDiagOverlay === 'function') {
       }
     }
 
-    createTouchControls() {
+    refreshTouchControls(reason = 'refresh') {
+      if (this.deviceControlsAllowed) {
+        this.createTouchControls(reason);
+      } else {
+        this.destroyTouchControls(reason);
+      }
+    }
+
+    destroyTouchControls(reason = 'destroy') {
+      const hadControls =
+        this.controlsMounted ||
+        (this.touchButtonsList && this.touchButtonsList.length > 0) ||
+        (this.joystickList && this.joystickList.length > 0);
+
+      if (this.touchButtonsList && this.touchButtonsList.length) {
+        this.touchButtonsList.forEach((button) => {
+          if (button && typeof button.destroy === 'function') {
+            button.destroy();
+          }
+        });
+      }
+
+      const buttonBuckets = this.touchButtons || {};
+      Object.keys(buttonBuckets).forEach((player) => {
+        const entries = buttonBuckets[player];
+        if (!entries) {
+          return;
+        }
+        Object.keys(entries).forEach((key) => {
+          const control = entries[key];
+          if (control && typeof control.destroy === 'function') {
+            control.destroy();
+          }
+        });
+      });
+
+      const joystickBuckets = this.virtualJoysticks || {};
+      Object.keys(joystickBuckets).forEach((key) => {
+        const joystick = joystickBuckets[key];
+        if (joystick && typeof joystick.destroy === 'function') {
+          joystick.destroy();
+        }
+      });
+
+      this.touchButtons = { p1: {}, p2: {} };
+      this.virtualJoysticks = { p1: null, p2: null };
+      this.touchButtonsList = [];
+      this.joystickList = [];
+      const previousMounted = this.controlsMounted;
+      this.controlsMounted = false;
+
+      if (
+        hadControls &&
+        typeof console !== 'undefined' &&
+        console &&
+        typeof console.log === 'function'
+      ) {
+        const uid = this.deviceLockUid || (this.net && this.net.uid) || null;
+        const deviceId = this.localDeviceId || (this.net && this.net.deviceId) || null;
+        console.log(`[CONTROLS] unmounted uid=${uid || 'unknown'} deviceId=${deviceId || 'unknown'}`, {
+          reason: reason || 'destroy',
+          wasMounted: previousMounted,
+        });
+      }
+
+      this.updateTouchControlsVisibility();
+    }
+
+    createTouchControls(reason = 'mount') {
+      if (this.controlsMounted) {
+        return;
+      }
+      if (!this.deviceControlsAllowed) {
+        return;
+      }
       if (this.diagnosticsActive() && this._joyDiagModes.noControls) {
         return;
       }
+
+      this.touchButtons = { p1: {}, p2: {} };
+      this.virtualJoysticks = { p1: null, p2: null };
+      this.touchButtonsList = [];
+      this.joystickList = [];
 
       if (this.input) {
         this.input.addPointer(7);
@@ -4395,6 +4663,9 @@ if (typeof this.positionNetDiagOverlay === 'function') {
 
       const createButton = (player, key, label, textStyleOverrides = {}) => {
         const button = this.createTouchButton(label, textStyleOverrides);
+        if (!this.touchButtons[player]) {
+          this.touchButtons[player] = {};
+        }
         this.touchButtons[player][key] = button;
         this.touchButtonsList.push(button);
         button.activePointers = this.pointerStates[player][key];
@@ -4457,6 +4728,23 @@ if (typeof this.positionNetDiagOverlay === 'function') {
 
       this.positionTouchButtons();
       this.updateTouchControlsVisibility();
+
+      this.controlsMounted = true;
+
+      if (
+        typeof console !== 'undefined' &&
+        console &&
+        typeof console.log === 'function'
+      ) {
+        const uid = this.deviceLockUid || (this.net && this.net.uid) || null;
+        const deviceId = this.localDeviceId || (this.net && this.net.deviceId) || null;
+        console.log(`[CONTROLS] mounted uid=${uid || 'unknown'} deviceId=${deviceId || 'unknown'}`, {
+          reason: reason || 'mount',
+          pretendMobile: !!this._pretendMobile,
+        });
+      }
+
+      this.logTouchControlsCreationDiagnostics();
 
       if (joystickOnly) {
         this.hideLegacyTouchContainers();
@@ -4608,6 +4896,138 @@ if (typeof this.positionNetDiagOverlay === 'function') {
         overlays: overlayDepths,
         legacy: legacySummary,
       });
+    }
+
+    ensureSpectatorModal() {
+      if (
+        this._spectatorModal &&
+        this._spectatorModal.background &&
+        this._spectatorModal.title &&
+        this._spectatorModal.message &&
+        this._spectatorModal.detail
+      ) {
+        return this._spectatorModal;
+      }
+      if (!this.add || typeof this.add.rectangle !== 'function' || typeof this.add.text !== 'function') {
+        return null;
+      }
+      const background = this.add
+        .rectangle(0, 0, 420, 240, 0x040b14, 0.88)
+        .setOrigin(0.5, 0.5)
+        .setScrollFactor(0)
+        .setDepth(140)
+        .setVisible(false);
+      if (typeof background.setStrokeStyle === 'function') {
+        background.setStrokeStyle(2, 0x0bb4ff, 0.52);
+      }
+
+      const title = this.add
+        .text(0, 0, 'Spectator Mode', {
+          fontFamily: 'Inter, Arial, sans-serif',
+          fontSize: '32px',
+          fontStyle: '700',
+          color: '#ffffff',
+          align: 'center',
+        })
+        .setOrigin(0.5, 0.5)
+        .setScrollFactor(0)
+        .setDepth(141)
+        .setVisible(false);
+
+      const message = this.add
+        .text(0, 0, '', {
+          fontFamily: 'Inter, Arial, sans-serif',
+          fontSize: '18px',
+          color: '#d5e8ff',
+          align: 'center',
+          wordWrap: { width: 360, useAdvancedWrap: true },
+        })
+        .setOrigin(0.5, 0)
+        .setScrollFactor(0)
+        .setDepth(141)
+        .setVisible(false);
+
+      const detail = this.add
+        .text(0, 0, '', {
+          fontFamily: 'Inter, Arial, sans-serif',
+          fontSize: '14px',
+          color: '#7fb8ff',
+          align: 'center',
+          wordWrap: { width: 360, useAdvancedWrap: true },
+        })
+        .setOrigin(0.5, 0)
+        .setScrollFactor(0)
+        .setDepth(141)
+        .setVisible(false);
+
+      this._spectatorModal = { background, title, message, detail };
+      this.updateSpectatorModalLayout();
+      return this._spectatorModal;
+    }
+
+    showSpectatorModal(payload = {}) {
+      const modal = this.ensureSpectatorModal();
+      if (!modal) {
+        return;
+      }
+      const docDeviceId =
+        payload && typeof payload.docDeviceId === 'string' ? payload.docDeviceId : null;
+      const lines = [
+        'This session is already controlled from another device.',
+        'You are connected in spectator mode.',
+      ];
+      const detailLines = [];
+      if (docDeviceId && (!payload.deviceId || docDeviceId !== payload.deviceId)) {
+        detailLines.push(`Active device ID: ${docDeviceId.slice(0, 8)}…`);
+      }
+      detailLines.push('Stay connected here to keep watching the match live.');
+      modal.background.setVisible(true);
+      modal.title.setVisible(true);
+      modal.message.setVisible(true);
+      modal.detail.setVisible(true);
+      modal.title.setText('Spectator Mode');
+      modal.message.setText(lines.join('\n'));
+      modal.detail.setText(detailLines.join('\n'));
+      modal.detail.setVisible(detailLines.length > 0);
+      this.updateSpectatorModalLayout();
+    }
+
+    hideSpectatorModal() {
+      const modal = this._spectatorModal;
+      if (!modal) {
+        return;
+      }
+      modal.background.setVisible(false);
+      modal.title.setVisible(false);
+      modal.message.setVisible(false);
+      modal.detail.setVisible(false);
+    }
+
+    updateSpectatorModalLayout() {
+      const modal = this._spectatorModal;
+      if (!modal || !modal.background) {
+        return;
+      }
+      const size = this.scale ? this.scale.gameSize : null;
+      const width = size && typeof size.width === 'number' ? size.width : 800;
+      const height = size && typeof size.height === 'number' ? size.height : 600;
+      const panelWidth = Math.min(500, Math.max(300, width - 80));
+      const panelHeight = Math.min(320, Math.max(220, height - 160));
+      const centerX = width * 0.5;
+      const centerY = height * 0.5;
+      modal.background.setPosition(centerX, centerY);
+      if (typeof modal.background.setDisplaySize === 'function') {
+        modal.background.setDisplaySize(panelWidth, panelHeight);
+      }
+      modal.title.setPosition(centerX, centerY - panelHeight * 0.32);
+      modal.message.setPosition(centerX, centerY - 24);
+      if (typeof modal.message.setWordWrapWidth === 'function') {
+        modal.message.setWordWrapWidth(panelWidth - 60, true);
+      }
+      modal.detail.setPosition(centerX, centerY + panelHeight * 0.18);
+      if (typeof modal.detail.setWordWrapWidth === 'function') {
+        modal.detail.setWordWrapWidth(panelWidth - 60, true);
+      }
     }
 
     hideLegacyTouchContainers() {

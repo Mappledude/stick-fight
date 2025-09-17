@@ -4,10 +4,15 @@ service cloud.firestore {
   match /databases/{db}/documents {
     match /rooms/{roomId}/players/{uid} {
       allow read: if true;
-      allow create, update: if request.auth != null
+      allow create: if request.auth != null
         && request.auth.uid == uid
-        && (!exists(/databases/$(db)/documents/rooms/$(roomId)/players/$(uid))
-            || request.resource.data.deviceId == resource.data.deviceId);
+        && request.resource.data.uid == uid
+        && request.resource.data.deviceId is string
+        && request.resource.data.deviceId != '';
+      allow update: if request.auth != null
+        && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.deviceId == resource.data.deviceId;
       allow delete: if request.auth != null && request.auth.uid == uid;
     }
   }

@@ -42,6 +42,102 @@
     isHost: false,
     playerName: null,
     shareUrl: null,
+    uid: null,
+    deviceId: null,
+    heartbeatRef: null,
+    heartbeatTimer: null,
+  };
+
+  const DEVICE_ID_STORAGE_KEY = 'stickfight.deviceId';
+  const DEVICE_MISMATCH_ERROR_CODE = 'stickfight/device-mismatch';
+  const HEARTBEAT_INTERVAL_MS = 20000;
+
+  const randomDeviceId = () => {
+    try {
+      if (typeof global.crypto !== 'undefined' && typeof global.crypto.randomUUID === 'function') {
+        return global.crypto.randomUUID();
+      }
+    } catch (error) {}
+    let values = null;
+    try {
+      if (
+        typeof global.crypto !== 'undefined' &&
+        typeof global.crypto.getRandomValues === 'function'
+      ) {
+        const array = new Uint8Array(16);
+        global.crypto.getRandomValues(array);
+        values = Array.from(array);
+      }
+    } catch (error) {}
+    if (!values) {
+      values = Array.from({ length: 16 }, () => Math.floor(Math.random() * 256));
+    }
+    return values
+      .map((value) => {
+        const safe = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+        return safe.toString(16).padStart(2, '0');
+      })
+      .join('');
+  };
+
+  const getDeviceId = () => {
+    try {
+      const storage = typeof global.localStorage !== 'undefined' ? global.localStorage : null;
+      if (!storage) {
+        return randomDeviceId();
+      }
+      const existing = storage.getItem(DEVICE_ID_STORAGE_KEY);
+      if (typeof existing === 'string' && existing.length > 0) {
+        return existing;
+      }
+      const next = randomDeviceId();
+      storage.setItem(DEVICE_ID_STORAGE_KEY, next);
+      return next;
+    } catch (error) {
+      return randomDeviceId();
+    }
+  };
+
+  const stopHeartbeat = () => {
+    if (netState.heartbeatTimer) {
+      try {
+        clearInterval(netState.heartbeatTimer);
+      } catch (error) {}
+    }
+    netState.heartbeatTimer = null;
+    netState.heartbeatRef = null;
+  };
+
+  const sendHeartbeat = (docRef, deviceId) => {
+    if (!docRef || !deviceId) {
+      return Promise.resolve();
+    }
+    const payload = {
+      deviceId,
+      lastSeenAt: getTimestampValue(),
+    };
+    return docRef.set(payload, { merge: true }).catch((error) => {
+      bootLog('NET', 'heartbeat-error', error);
+    });
+  };
+
+  const startHeartbeat = (docRef, deviceId) => {
+    stopHeartbeat();
+    if (!docRef || !deviceId || typeof setInterval !== 'function') {
+      return;
+    }
+    netState.heartbeatRef = docRef;
+    const run = () => {
+      sendHeartbeat(docRef, deviceId);
+    };
+    run();
+    netState.heartbeatTimer = setInterval(run, HEARTBEAT_INTERVAL_MS);
+  };
+
+  const createDeviceMismatchError = (message) => {
+    const error = new Error(message);
+    error.code = DEVICE_MISMATCH_ERROR_CODE;
+    return error;
   };
 
   const firebaseNamespace = () => (typeof global.firebase !== 'undefined' ? global.firebase : null);
@@ -282,6 +378,9 @@ function ensureAuthReady() {
     const roomsCollection = firestore.collection('rooms');
     const roomRef = roomsCollection.doc(roomId);
     const playersRef = roomRef.collection('players').doc(currentUser.uid);
+    const deviceId = getDeviceId();
+
+    stopHeartbeat();
 
     await runTransaction(async (transaction) => {
       const existing = await transaction.get(roomRef);
@@ -293,12 +392,18 @@ function ensureAuthReady() {
         maxPlayers: 9,
         hostPeerId,
       });
+      const joinedAt = getTimestampValue();
+      const lastSeenAt = getTimestampValue();
       transaction.set(playersRef, {
         uid: currentUser.uid,
         peerId: hostPeerId,
         name: resolvedHostName,
-        joinedAt: getTimestampValue(),
+        nick: resolvedHostName,
+        joinedAt,
+        lastSeenAt,
         isHost: true,
+        deviceId,
+        hp: 100,
       });
     });
 
@@ -308,7 +413,14 @@ function ensureAuthReady() {
     netState.isHost = true;
     netState.playerName = resolvedHostName;
     netState.shareUrl = shareUrl;
+    netState.uid = currentUser.uid;
+    netState.deviceId = deviceId;
+    namespace.uid = netState.uid;
+    namespace.deviceId = netState.deviceId;
+    namespace.state = netState;
     netState.initialized = true;
+
+    startHeartbeat(playersRef, deviceId);
 
     emitEvent('roomCreated', {
       roomId,
@@ -337,6 +449,9 @@ function ensureAuthReady() {
     const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
     const peerId = generatePeerId();
     const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
+    const deviceId = getDeviceId();
+
+    stopHeartbeat();
 
     await runTransaction(async (transaction) => {
       const roomSnapshot = await transaction.get(roomRef);
@@ -349,15 +464,29 @@ function ensureAuthReady() {
       const playersSnapshot = await transaction.get(playersCollection);
       const existingPlayerDoc = await transaction.get(playerDocRef);
       const alreadyPresent = existingPlayerDoc && existingPlayerDoc.exists;
+      const existingData = alreadyPresent ? existingPlayerDoc.data() || {} : {};
+      if (alreadyPresent) {
+        const existingDevice =
+          existingData && typeof existingData.deviceId === 'string' ? existingData.deviceId : null;
+        if (existingDevice && existingDevice !== deviceId) {
+          throw createDeviceMismatchError('This player is already active on another device.');
+        }
+      }
       if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
         throw new Error('This room is already full.');
       }
+      const joinedAt = alreadyPresent && existingData.joinedAt ? existingData.joinedAt : getTimestampValue();
+      const lastSeenAt = getTimestampValue();
       transaction.set(playerDocRef, {
         uid: currentUser.uid,
         peerId,
         name: resolvedName,
-        joinedAt: getTimestampValue(),
+        nick: resolvedName,
+        joinedAt,
+        lastSeenAt,
         isHost: false,
+        deviceId,
+        hp: 100,
       });
     });
 
@@ -366,7 +495,14 @@ function ensureAuthReady() {
     netState.isHost = false;
     netState.playerName = resolvedName;
     netState.shareUrl = buildShareUrl(trimmedRoomId);
+    netState.uid = currentUser.uid;
+    netState.deviceId = deviceId;
+    namespace.uid = netState.uid;
+    namespace.deviceId = netState.deviceId;
+    namespace.state = netState;
     netState.initialized = true;
+
+    startHeartbeat(playerDocRef, deviceId);
 
     emitEvent('roomJoined', {
       roomId: trimmedRoomId,
@@ -792,6 +928,16 @@ function ensureAuthReady() {
     initWhenReady();
   }
 
+  if (typeof global !== 'undefined' && typeof global.addEventListener === 'function') {
+    try {
+      global.addEventListener('beforeunload', stopHeartbeat);
+      global.addEventListener('pagehide', stopHeartbeat);
+    } catch (error) {}
+  }
+
+  namespace.uid = netState.uid;
+  namespace.deviceId = netState.deviceId;
+
   global.StickFightNet = Object.assign(namespace, {
     state: netState,
     ensureFirestore,
@@ -803,5 +949,6 @@ function ensureAuthReady() {
     buildShareUrl,
     hideOverlay,
     showOverlay,
+    getDeviceId,
   });
 })(typeof window !== 'undefined' ? window : this);
