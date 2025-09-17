@@ -25,6 +25,7 @@
       host: false,
       init: false,
       sw: false,
+      initMeta: null,
     },
   };
 
@@ -299,16 +300,71 @@
     log('SW', 'status=' + status + ' controller=' + controller);
   }
 
-  function logInitOnce(namespace, reused) {
+  function updateInitLogMetadata(partial) {
+    if (!state.logs.initMeta) {
+      state.logs.initMeta = {
+        sdkType: null,
+        scriptType: null,
+        appInitRequested: false,
+        reusedApp: false,
+        apps: 0,
+      };
+    }
+
+    const meta = state.logs.initMeta;
+    if (partial && typeof partial === 'object') {
+      if (Object.prototype.hasOwnProperty.call(partial, 'sdkType')) {
+        meta.sdkType = partial.sdkType;
+      }
+      if (Object.prototype.hasOwnProperty.call(partial, 'scriptType')) {
+        meta.scriptType = partial.scriptType;
+      }
+      if (Object.prototype.hasOwnProperty.call(partial, 'appInitRequested')) {
+        meta.appInitRequested = !!partial.appInitRequested;
+      }
+      if (Object.prototype.hasOwnProperty.call(partial, 'reusedApp')) {
+        meta.reusedApp = !!partial.reusedApp;
+      }
+      if (Object.prototype.hasOwnProperty.call(partial, 'apps')) {
+        meta.apps = typeof partial.apps === 'number' ? partial.apps : meta.apps;
+      }
+    }
+
+    return meta;
+  }
+
+  function logInitOnce(namespace, metadata) {
+    const meta = updateInitLogMetadata(metadata);
+
+    if (meta.sdkType === null) {
+      meta.sdkType = detectSdkType(namespace);
+    }
+    if (meta.scriptType === null) {
+      meta.scriptType = detectScriptType();
+    }
+
     if (state.logs.init) {
       return;
     }
     state.logs.init = true;
 
-    const sdkType = detectSdkType(namespace);
-    const scriptType = detectScriptType();
-    const reusedValue = reused ? 'yes' : 'no';
-    log('INIT', 'sdk=' + sdkType + ' scriptType=' + scriptType + ' reusedApp=' + reusedValue);
+    const reusedValue = meta.reusedApp ? 'yes' : 'no';
+    const initRequestedValue = meta.appInitRequested ? 'yes' : 'no';
+    const appsValue = typeof meta.apps === 'number' ? meta.apps : 0;
+
+    log(
+      'INIT',
+      'sdk=' +
+        meta.sdkType +
+        ' scriptType=' +
+        meta.scriptType +
+        ' appInitRequested=' +
+        initRequestedValue +
+        ' reusedApp=' +
+        reusedValue +
+        ' apps=' +
+        appsValue
+    );
   }
 
   function warnConfigMismatch(existingConfig, expectedConfig) {
@@ -359,9 +415,6 @@
 
   function ensureFirebaseApp(boot) {
     resolveBoot(boot);
-    if (state.app) {
-      return state.app;
-    }
     const namespace = getFirebaseNamespace();
     const config = ensureConfig(boot);
 
@@ -380,6 +433,21 @@
       }
     }
 
+    const appsCount = apps && typeof apps.length === 'number' ? apps.length : 0;
+    const metadata = {
+      sdkType: detectSdkType(namespace),
+      scriptType: detectScriptType(),
+      apps: appsCount,
+      reusedApp: false,
+      appInitRequested: false,
+    };
+
+    if (state.app) {
+      metadata.reusedApp = true;
+      logInitOnce(namespace, metadata);
+      return state.app;
+    }
+
     if (apps && apps.length > 0) {
       const existingApp = hasCompatApps
         ? (typeof namespace.app === 'function' ? namespace.app() : apps[0])
@@ -389,7 +457,8 @@
         warnConfigMismatch(existingConfig, config);
       }
       state.app = existingApp;
-      logInitOnce(namespace, true);
+      metadata.reusedApp = true;
+      logInitOnce(namespace, metadata);
       return state.app;
     }
 
@@ -397,8 +466,9 @@
       throw new Error('Firebase initializeApp method is not available.');
     }
 
+    metadata.appInitRequested = true;
     state.app = namespace.initializeApp(config);
-    logInitOnce(namespace, false);
+    logInitOnce(namespace, metadata);
     return state.app;
   }
 
