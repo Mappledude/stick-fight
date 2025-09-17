@@ -445,12 +445,39 @@
           const name = data.name || 'Player';
           if (change.type === 'removed') {
             removePlayerFromDirectory(peerId);
+            if (
+              runtime.role === 'host' &&
+              runtime.scene &&
+              typeof runtime.scene.onNetPeerLeft === 'function'
+            ) {
+              try {
+                runtime.scene.onNetPeerLeft(peerId);
+              } catch (err) {
+                console.warn('[Net] Failed to notify scene of peer removal', err);
+              }
+            }
             if (runtime.role === 'host') {
               teardownConnection(peerId);
             }
             return;
           }
           updatePlayerDirectory(peerId, name);
+if (runtime.role === 'host' && peerId !== runtime.localPeerId) {
+  ensureHostConnection(peerId);
+}
+if (
+  change.type === 'added' &&
+  runtime.role === 'host' &&
+  runtime.scene &&
+  typeof runtime.scene.onNetPeerJoined === 'function'
+) {
+  try {
+    runtime.scene.onNetPeerJoined(peerId, { isLocal: peerId === runtime.localPeerId });
+  } catch (err) {
+    console.warn('[Net] Failed to notify scene of peer join', err);
+  }
+}
+
           if (!runtime.slotAssignments.p1 && data.isHost) {
             runtime.slotAssignments.p1 = peerId;
           }
@@ -709,6 +736,17 @@
         receivedAt: now,
         stale: typeof payload.t === 'number' ? now - payload.t > INPUT_STALE_MS : false,
       };
+      if (
+        runtime.role === 'host' &&
+        runtime.scene &&
+        typeof runtime.scene.onPeerInput === 'function'
+      ) {
+        try {
+          runtime.scene.onPeerInput(peerId, runtime.peerInputs[peerId]);
+        } catch (err) {
+          console.warn('[Net] Scene peer input handling failed', err);
+        }
+      }
       connection.lastInputReceivedAt = now;
       runtime.lastInputReceivedAt = now;
       const moveX = clamp(Number(payload.p.mx) || 0, -1, 1);

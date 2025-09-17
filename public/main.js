@@ -128,6 +128,7 @@
   })();
 
   const NET_DIAG_ENABLED = !!NET_QUERY_PARAMS.netdiag;
+  const NET_INPUT_STALE_MS = 1500;
 
   function netDiagLog(tag, payload) {
     if (!NET_DIAG_ENABLED) {
@@ -950,6 +951,7 @@
   const JOYSTICK_JUMP_HORIZONTAL_THRESHOLD = 0.32;
   const JOYSTICK_CROUCH_THRESHOLD = 0.45;
   const GRAVITY_Y = 2200;
+  const FIXED_DT = 1 / 60;
   const MIN_LAYOUT_WIDTH = 320;
   const MIN_LAYOUT_HEIGHT = 180;
   const LAYOUT_POLL_INTERVAL = 16;
@@ -1895,6 +1897,9 @@
     constructor() {
       super({ key: 'MainScene' });
       this.dt = 0;
+      this._simAcc = 0;
+      this._simTickCount = 0;
+      this._simTickLogTimer = 0;
       this._centeredElements = [];
       this.titleText = null;
       this.p1Input = this.createPlayerInputState();
@@ -2875,6 +2880,8 @@ this.teardownNetworking && this.teardownNetworking();
     createNetState(role) {
       this.net = {
         role: role,
+        roomId: null,
+        peerId: null,
         pcMap: {},
         dcMap: {},
         inputDc: null,
@@ -2882,6 +2889,8 @@ this.teardownNetworking && this.teardownNetworking();
         rtts: {},
         lastOfferTs: null,
         lastAnswerTs: null,
+        peerInputs: {},
+        players: {},
       };
     }
 
@@ -2905,6 +2914,15 @@ this.teardownNetworking && this.teardownNetworking();
       }
 
       this.createNetState(session.isHost ? 'host' : 'guest');
+      if (this.net) {
+        this.net.roomId = session.roomId;
+        this.net.peerId = session.peerId;
+        this.net.peerInputs = {};
+        this.net.players = {};
+      }
+      if (session.isHost && typeof this.onNetPeerJoined === 'function') {
+        this.onNetPeerJoined(session.peerId, { isLocal: true });
+      }
 
       const signaling = new Signaling({
         db: db,
@@ -2948,6 +2966,10 @@ this.teardownNetworking && this.teardownNetworking();
         this.net.rtts = {};
         this.net.lastOfferTs = null;
         this.net.lastAnswerTs = null;
+        this.net.peerInputs = {};
+        this.net.players = {};
+        this.net.peerId = null;
+        this.net.roomId = null;
       }
       this.net = null;
       this.updateNetOverlay();
@@ -3456,6 +3478,38 @@ if (typeof this.positionNetDiagOverlay === 'function') {
     update(time, delta) {
       this.dt = Math.min(delta, 50) / 1000;
 
+      const role = this.net && typeof this.net.role === 'string' ? this.net.role : null;
+      if (role === 'host') {
+        const stepDelta = Math.min(delta / 1000, 0.1);
+        this._simAcc += stepDelta;
+        if (this._netDiagEnabled) {
+          this._simTickLogTimer += stepDelta;
+        }
+        while (this._simAcc >= FIXED_DT) {
+          this.serverFixedStep(FIXED_DT);
+          this._simAcc -= FIXED_DT;
+          if (this._netDiagEnabled) {
+            this._simTickCount += 1;
+          }
+        }
+        if (this._netDiagEnabled && this._simTickLogTimer >= 1) {
+          const seconds = this._simTickLogTimer;
+          const ticks = this._simTickCount;
+          const rate = seconds > 0 ? ticks / seconds : 0;
+          netDiagLog('sim:ticks-per-sec', {
+            ticks,
+            seconds,
+            rate,
+          });
+          this._simTickLogTimer = 0;
+          this._simTickCount = 0;
+        }
+      } else {
+        this._simAcc = 0;
+        this._simTickCount = 0;
+        this._simTickLogTimer = 0;
+      }
+
       this._joyDiagFrameIndex = (this._joyDiagFrameIndex || 0) + 1;
       const diagnosticsActive = this.diagnosticsActive();
       if (diagnosticsActive) {
@@ -3512,11 +3566,250 @@ if (typeof this.positionNetDiagOverlay === 'function') {
 
       this.updateDebugOverlay();
       this.updateNetOverlay();
+      if (this.net && this.net.role === 'host' && typeof this.serverFixedStep === 'function') {
+        this.serverFixedStep(this.dt);
+      }
       traceControls(this);
 
       if (this._joyDiagFrameState) {
         this.flushJoyDiagFrameDiagnostics();
       }
+    }
+
+    // --- NET-04b helpers: timestamp & input normalization ---
+    getNetTimestamp() {
+      if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+        return performance.now();
+      }
+      return Date.now();
+    }
+
+    createDefaultNetInput() {
+      return { moveX: 0, crouch: false, punch: false, kick: false, jump: 0 };
+    }
+
+    normalizePeerInputPacket(packet) {
+      if (!packet || typeof packet !== 'object') {
+        const defaults = this.createDefaultNetInput();
+        return Object.assign(
+          { receivedAt: this.getNetTimestamp(), sequence: null, timestamp: null, packetStale: false },
+          defaults
+        );
+      }
+      const payload = packet.payload && typeof packet.payload === 'object' ? packet.payload : null;
+      const inputPayload = payload && typeof payload.p === 'object' ? payload.p : null;
+      const defaults = this.createDefaultNetInput();
+
+      const moveX = inputPayload && typeof inputPayload.mx !== 'undefined'
+        ? Phaser.Math.Clamp(Number(inputPayload.mx) || 0, -1, 1)
+        : defaults.moveX;
+      const crouch = inputPayload && typeof inputPayload.cr !== 'undefined'
+        ? !!inputPayload.cr
+        : defaults.crouch;
+      const punch = inputPayload && typeof inputPayload.pu !== 'undefined'
+        ? !!inputPayload.pu
+        : defaults.punch;
+      const kick = inputPayload && typeof inputPayload.ki !== 'undefined'
+        ? !!inputPayload.ki
+        : defaults.kick;
+      const rawJump = (inputPayload && typeof inputPayload.ju === 'number') ? inputPayload.ju : defaults.jump;
+      const jump = Phaser.Math.Clamp(Math.round(rawJump), -1, 1);
+
+      const receivedAt =
+        (typeof packet.receivedAt === 'number' && Number.isFinite(packet.receivedAt))
+          ? packet.receivedAt
+          : this.getNetTimestamp();
+      const sequence =
+        (payload && typeof payload.seq === 'number' && Number.isFinite(payload.seq))
+          ? payload.seq
+          : null;
+      const timestamp =
+        (payload && typeof payload.t === 'number' && Number.isFinite(payload.t))
+          ? payload.t
+          : null;
+
+      return {
+        moveX,
+        crouch,
+        punch,
+        kick,
+        jump,
+        receivedAt,
+        sequence,
+        timestamp,
+        packetStale: !!packet.stale,
+      };
+    }
+
+    // --- Spawn positioning for new peers (host) ---
+    computeNetSpawnPosition(index) {
+      const worldBounds =
+        this.physics && this.physics.world && this.physics.world.bounds
+          ? this.physics.world.bounds
+          : null;
+      const area = worldBounds
+        ? { x: worldBounds.x, y: worldBounds.y, w: worldBounds.width, h: worldBounds.height }
+        : this.playArea || { x: 0, y: 0, w: 0, h: 0 };
+
+      const marginX = 64;
+      const marginY = 72;
+      const width  = Math.max((typeof area.w === 'number' ? area.w : 0), marginX * 2 + 1);
+      const height = Math.max((typeof area.h === 'number' ? area.h : 0), marginY * 2 + 1);
+      const safeLeft   = area.x + marginX;
+      const safeRight  = area.x + width  - marginX;
+      const safeBottom = area.y + height - marginY;
+      const centerX = area.x + width * 0.5;
+
+      const offset   = (index % 4) - 1.5;
+      const spacing  = 120;
+      const spawnX = Phaser.Math.Clamp(centerX + offset * spacing, safeLeft, safeRight);
+      const spawnY = Phaser.Math.Clamp(safeBottom, area.y + marginY, area.y + height - marginY);
+      return { x: spawnX, y: spawnY };
+    }
+
+    onNetPeerJoined(peerId, meta) {
+      if (!this.net || this.net.role !== 'host') return;
+      if (typeof peerId !== 'string' || peerId.length === 0) return;
+
+      if (!this.net.players) this.net.players = {};
+      if (this.net.players[peerId]) return;
+
+      const index = Object.keys(this.net.players).length;
+      const spawn = this.computeNetSpawnPosition(index);
+      const centerX = this.playArea ? (this.playArea.x + this.playArea.w * 0.5) : spawn.x;
+      const facing = (spawn.x < centerX) ? 1 : -1;
+
+      const record = {
+        id: peerId,
+        x: spawn.x,
+        y: spawn.y,
+        vx: 0,
+        vy: 0,
+        hp: 100,
+        facing: facing,
+        onGround: true,
+        lastInputAt: null,
+        lastKnownInput: null,
+        inputStale: false,
+        lastPacketStale: false,
+        packetTimestamp: null,
+        packetSequence: null,
+        lastProcessedAt: null,
+      };
+      this.net.players[peerId] = record;
+
+      if (!this.net.peerInputs) this.net.peerInputs = {};
+      if (!meta || !meta.skipLog) {
+        console.log('[Net] Registered player', peerId, record);
+      }
+    }
+
+    onNetPeerLeft(peerId) {
+      if (!this.net || !this.net.players) return;
+      if (typeof peerId !== 'string' || peerId.length === 0) return;
+
+      if (this.net.players[peerId]) {
+        delete this.net.players[peerId];
+        if (this.net.peerInputs) delete this.net.peerInputs[peerId];
+        console.log('[Net] Removed player', peerId);
+      }
+    }
+
+    onPeerInput(peerId, packet) {
+      if (!this.net || this.net.role !== 'host') return;
+      if (typeof peerId !== 'string' || peerId.length === 0) return;
+
+      const normalized = this.normalizePeerInputPacket(packet);
+      if (!this.net.peerInputs) this.net.peerInputs = {};
+      this.net.peerInputs[peerId] = normalized;
+
+      const record = this.net.players ? this.net.players[peerId] : null;
+      if (record) {
+        record.lastPacketStale = !!normalized.packetStale;
+      }
+    }
+
+    // --- Host fixed-step input plumbing (keeps noop fallback out) ---
+    serverFixedStep(dt) {
+      if (!this.net || this.net.role !== 'host') {
+        return; // guest or offline: host sim not active
+      }
+
+      const STALE_MS = (typeof NET_INPUT_STALE_MS === 'number') ? NET_INPUT_STALE_MS : 1500;
+
+      const players = this.net.players || {};
+      const now = this.getNetTimestamp();
+      const ids = Object.keys(players);
+
+      for (let i = 0; i < ids.length; i += 1) {
+        const peerId = ids[i];
+        if (!peerId || peerId === this.net.peerId) {
+          // Skip the host’s own local record here if you handle it elsewhere;
+          // or include it if you want uniform handling for all players.
+          continue;
+        }
+
+        const player = players[peerId];
+        if (!player) continue;
+
+        const defaults = this.createDefaultNetInput();
+        const incoming = this.net.peerInputs ? this.net.peerInputs[peerId] : null;
+
+        if (incoming) {
+          const applied = Object.assign({}, defaults, incoming);
+          const packetMarkedStale = !!applied.packetStale;
+
+          player.packetTimestamp = (typeof applied.timestamp === 'number') ? applied.timestamp : null;
+          player.packetSequence  = (typeof applied.sequence  === 'number') ? applied.sequence  : null;
+
+          // consume the queued packet
+          delete this.net.peerInputs[peerId];
+
+          if (packetMarkedStale) {
+            if (!player.lastPacketStale) {
+              console.warn('[Net] Player ' + peerId + ' packet stale (timestamp drift)');
+            }
+            player.lastPacketStale = true;
+            player.inputStale = true;
+            player.lastInputAt = now - (STALE_MS + 1);
+            player.activeInput = Object.assign({}, defaults);
+            player.lastProcessedAt = now;
+            continue;
+          }
+
+          player.lastPacketStale = false;
+          player.lastKnownInput = applied;
+          player.lastInputAt = (typeof applied.receivedAt === 'number' && Number.isFinite(applied.receivedAt))
+            ? applied.receivedAt
+            : now;
+        }
+
+        if (!player.lastKnownInput) {
+          player.activeInput = Object.assign({}, defaults);
+          player.inputStale = false;
+          continue;
+        }
+
+        const ageMs = (typeof player.lastInputAt === 'number') ? (now - player.lastInputAt) : null;
+        const isStale = (Number.isFinite(ageMs) && ageMs > STALE_MS);
+
+        if (isStale) {
+          if (!player.inputStale) {
+            console.warn('[Net] Player ' + peerId + ' input stale (' + Math.round(ageMs) + 'ms)');
+          }
+          player.inputStale = true;
+          player.activeInput = Object.assign({}, defaults);
+        } else {
+          if (player.inputStale) {
+            console.log('[Net] Player ' + peerId + ' input active');
+          }
+          player.inputStale = false;
+          player.activeInput = Object.assign({}, defaults, player.lastKnownInput);
+        }
+
+        player.lastProcessedAt = now;
+      }
+    }
     }
 
     reconcileInputState() {
