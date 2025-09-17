@@ -40,6 +40,7 @@
     const text = scene.add
       .text(0, 0, content, textStyle)
       .setOrigin(0.5, 0.5)
+      .setName(`centerText:${content}`)
       .setDepth(20)
       .setAlpha(1)
       .setVisible(true);
@@ -379,6 +380,7 @@
       this.virtualJoysticks = { p1: null, p2: null };
       this.touchButtonsList = [];
       this.joystickList = [];
+      this._joyDiagnosticsEnabled = false;
       this.touchButtonLayout = {
         size: 80,
         gap: 18,
@@ -404,10 +406,14 @@
           const params = new URLSearchParams(win.location.search);
           this._forceJoystick = parseDebugFlag(params.get('forceJoystick'));
           this._forceKeyboard = parseDebugFlag(params.get('forceKeyboard'));
+          this._joyDiagnosticsEnabled = parseDebugFlag(params.get('joydiag'));
         } else {
           const searchLower = win.location.search.toLowerCase();
           this._forceJoystick = /[?&]forcejoystick=(1|true|yes|on)\b/.test(searchLower);
           this._forceKeyboard = /[?&]forcekeyboard=(1|true|yes|on)\b/.test(searchLower);
+          if (/[?&]joydiag=(1|true|yes|on)\b/.test(searchLower)) {
+            this._joyDiagnosticsEnabled = true;
+          }
         }
       }
 
@@ -457,6 +463,12 @@
       this.cameras.main.setBackgroundColor('#111');
 
       this.titleText = centerText(this, 'Stick-Fight', -28, { fontSize: '56px', fontStyle: '700' });
+      if (this.titleText && this.titleText.setName) {
+        this.titleText.setName('titleText');
+      }
+      if (this._joyDiagnosticsEnabled) {
+        console.info('[JOYDIAG] Diagnostics enabled');
+      }
       if (this.titleText && this.titleText.setInteractive) {
         this.titleText.setInteractive({ useHandCursor: false });
         this.titleText.on('pointerdown', (pointer) => {
@@ -1055,10 +1067,16 @@
         radius: this.touchButtonLayout.joystickRadius,
         deadzone: JOYSTICK_DEADZONE,
       });
+      if (joystickP1 && joystickP1.setName) {
+        joystickP1.setName('virtualJoystick:p1');
+      }
       const joystickP2 = new VirtualJoystick(this, 0, 0, {
         radius: this.touchButtonLayout.joystickRadius,
         deadzone: JOYSTICK_DEADZONE,
       });
+      if (joystickP2 && joystickP2.setName) {
+        joystickP2.setName('virtualJoystick:p2');
+      }
 
       const onJoystickInput = () => {
         if (this._forceKeyboard) {
@@ -1089,6 +1107,7 @@
 
       this.positionTouchButtons();
       this.updateTouchControlsVisibility();
+      this.logJoyDiagnostics('createTouchControls');
     }
 
     createTouchButton(label, textStyleOverrides = {}) {
@@ -1097,6 +1116,9 @@
       container.setSize(size, size);
       container.setScrollFactor(0);
       container.setDepth(30);
+      if (container.setName) {
+        container.setName(`touchButton:${label}`);
+      }
 
       const background = this.add.rectangle(0, 0, size, size, 0x333333);
       background.setOrigin(0.5, 0.5);
@@ -1113,6 +1135,9 @@
       };
 
       const labelText = this.add.text(0, 0, label, textStyle).setOrigin(0.5, 0.5);
+      if (labelText && labelText.setName) {
+        labelText.setName(`touchButtonLabel:${label}`);
+      }
 
       container.add([background, labelText]);
       container.buttonBackground = background;
@@ -1511,7 +1536,8 @@
           color: '#00e7ff',
           align: 'center',
         })
-        .setOrigin(0.5, 0);
+        .setOrigin(0.5, 0)
+        .setName('debugOverlayText');
       text.setScrollFactor(0);
       text.setDepth(40);
       text.setAlpha(1);
@@ -1555,6 +1581,199 @@
       this.debugText.setVisible(this.debugOverlayVisible);
     }
 
+    logJoyDiagnostics(reason = '') {
+      if (!this._joyDiagnosticsEnabled) {
+        return;
+      }
+      try {
+        const gameSize = this.scale ? this.scale.gameSize : null;
+        const gameWidth = gameSize && Number.isFinite(gameSize.width) ? gameSize.width : 0;
+        const gameHeight = gameSize && Number.isFinite(gameSize.height) ? gameSize.height : 0;
+        const depthThreshold = 20;
+        const entryMap = new Map();
+
+        const toNumber = (value) => (Number.isFinite(value) ? value : 0);
+        const buildLabel = (obj, fallback) => {
+          if (typeof fallback === 'string' && fallback.length > 0) {
+            return fallback;
+          }
+          if (obj && typeof obj.name === 'string' && obj.name.length > 0) {
+            return obj.name;
+          }
+          if (obj && typeof obj.type === 'string' && obj.type.length > 0) {
+            return obj.type;
+          }
+          if (obj && obj.constructor && typeof obj.constructor.name === 'string') {
+            return obj.constructor.name;
+          }
+          return 'GameObject';
+        };
+
+        const registerEntry = (obj, options = {}) => {
+          if (!obj || typeof obj !== 'object') {
+            return null;
+          }
+          const source = options.source || 'unknown';
+          const isFullScreen = !!options.isFullScreen;
+          const isHighDepth = !!options.isHighDepth;
+          const include = !!options.force || isFullScreen || isHighDepth;
+          if (!include) {
+            return null;
+          }
+
+          const depth = toNumber(obj.depth);
+          const width = toNumber(obj.displayWidth);
+          const height = toNumber(obj.displayHeight);
+          const fallbackWidth = toNumber(obj.width);
+          const fallbackHeight = toNumber(obj.height);
+          const finalWidth = width > 0 ? width : fallbackWidth;
+          const finalHeight = height > 0 ? height : fallbackHeight;
+          const inputComponent = obj.input;
+          let inputEnabled = false;
+          if (inputComponent) {
+            if (typeof inputComponent.enabled === 'boolean') {
+              inputEnabled = inputComponent.enabled;
+            } else {
+              inputEnabled = true;
+            }
+          }
+          const visible = typeof obj.visible === 'boolean' ? obj.visible : true;
+
+          const notes = [];
+          if (isFullScreen) {
+            notes.push('full');
+          }
+          if (isHighDepth) {
+            notes.push('depth');
+          }
+          if (options.force && !isFullScreen && !isHighDepth) {
+            notes.push('forced');
+          }
+
+          const label = buildLabel(obj, options.label);
+
+          if (entryMap.has(obj)) {
+            const entry = entryMap.get(obj);
+            entry.depth = Math.max(entry.depth, depth);
+            entry.width = Math.max(entry.width, finalWidth);
+            entry.height = Math.max(entry.height, finalHeight);
+            entry.inputEnabled = entry.inputEnabled || inputEnabled;
+            entry.visible = entry.visible || visible;
+            entry.notes = Array.from(new Set([...entry.notes, ...notes]));
+            if (!entry.sources.includes(source)) {
+              entry.sources.push(source);
+            }
+            return entry;
+          }
+
+          const entry = {
+            obj,
+            label,
+            depth,
+            width: finalWidth,
+            height: finalHeight,
+            inputEnabled,
+            visible,
+            sources: [source],
+            notes,
+          };
+          entryMap.set(obj, entry);
+          return entry;
+        };
+
+        if (this.children && Array.isArray(this.children.list)) {
+          this.children.list.forEach((child) => {
+            if (!child) {
+              return;
+            }
+            const depth = toNumber(child.depth);
+            const width = toNumber(child.displayWidth) || toNumber(child.width);
+            const height = toNumber(child.displayHeight) || toNumber(child.height);
+            const widthRatio = gameWidth > 0 ? width / gameWidth : 0;
+            const heightRatio = gameHeight > 0 ? height / gameHeight : 0;
+            const isFullScreen = widthRatio >= 0.8 && heightRatio >= 0.8 && width > 0 && height > 0;
+            const isHighDepth = depth >= depthThreshold;
+            registerEntry(child, {
+              source: 'children',
+              isFullScreen,
+              isHighDepth,
+            });
+          });
+        }
+
+        const knownObjects = [
+          this.titleText,
+          this.debugText,
+          this.virtualJoysticks ? this.virtualJoysticks.p1 : null,
+          this.virtualJoysticks ? this.virtualJoysticks.p2 : null,
+        ];
+        knownObjects.forEach((obj) => {
+          registerEntry(obj, { source: 'known', force: true });
+        });
+
+        (this.touchButtonsList || []).forEach((button) => {
+          registerEntry(button, { source: 'touchButtons', force: true });
+        });
+
+        if (this.input) {
+          const inputList = Array.isArray(this.input._list)
+            ? this.input._list
+            : Array.isArray(this.input.list)
+            ? this.input.list
+            : null;
+          if (Array.isArray(inputList)) {
+            inputList.forEach((item) => {
+              const obj = item && typeof item === 'object' ? item.gameObject || item : null;
+              registerEntry(obj, { source: 'input', force: true });
+            });
+          }
+        }
+
+        const entries = Array.from(entryMap.values());
+        if (!entries.length) {
+          console.log(
+            `[JOYDIAG] ${reason || 'log'} - no candidates (gameSize ${gameWidth}x${gameHeight})`
+          );
+          return;
+        }
+
+        entries.sort((a, b) => {
+          if (b.depth === a.depth) {
+            return a.label.localeCompare(b.label);
+          }
+          return b.depth - a.depth;
+        });
+
+        const header = `[JOYDIAG] ${reason || 'control-layers'} (${gameWidth}x${gameHeight})`;
+        const openGroup = typeof console.groupCollapsed === 'function';
+        if (openGroup) {
+          console.groupCollapsed(header);
+        } else {
+          console.log(header);
+        }
+        entries.forEach((entry) => {
+          const formatSize = (value) => (Number.isFinite(value) ? value.toFixed(1) : '0.0');
+          const messageParts = [
+            `depth=${entry.depth}`,
+            `input=${entry.inputEnabled ? 'Y' : 'N'}`,
+            `visible=${entry.visible ? 'Y' : 'N'}`,
+            `size=${formatSize(entry.width)}x${formatSize(entry.height)}`,
+            `sources=${entry.sources.join(',')}`,
+          ];
+          if (entry.notes.length) {
+            messageParts.push(`notes=${entry.notes.join('|')}`);
+          }
+          messageParts.push(entry.label);
+          console.log('[JOYDIAG]', messageParts.join(' '));
+        });
+        if (openGroup) {
+          console.groupEnd();
+        }
+      } catch (error) {
+        console.warn('[JOYDIAG] log failed', error);
+      }
+    }
+
     toggleDebugOverlay(forceState) {
       if (typeof forceState === 'boolean') {
         this.debugOverlayVisible = forceState;
@@ -1562,6 +1781,7 @@
         this.debugOverlayVisible = !this.debugOverlayVisible;
       }
       this.updateDebugOverlay();
+      this.logJoyDiagnostics(`toggleDebugOverlay:${this.debugOverlayVisible ? 'on' : 'off'}`);
     }
   }
 
