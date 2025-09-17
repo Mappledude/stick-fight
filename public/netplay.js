@@ -41,7 +41,12 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
     guestCandidateUnsub: null,
     stateBroadcastTimer: null,
     serverStepTimer: null,
+    lastStateSnapshotSerialized: null,
   };
+
+  function clearLastStateSnapshot() {
+    runtime.lastStateSnapshotSerialized = null;
+  }
 
   function detectDiagnosticsFlag() {
     if (typeof window === 'undefined' || !window.location) {
@@ -136,6 +141,7 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
     if (!runtime.registry || typeof runtime.registry.ensurePlayer !== 'function') {
       const playRect = determinePlayRect();
       runtime.registry = server.createRegistry(playRect ? { playRect } : {});
+      clearLastStateSnapshot();
     }
     if (runtime.registry && typeof runtime.registry.setPlayRect === 'function') {
       const playRect = determinePlayRect();
@@ -580,6 +586,9 @@ if (
     if (runtime.peerInputs && Object.prototype.hasOwnProperty.call(runtime.peerInputs, peerId)) {
       delete runtime.peerInputs[peerId];
     }
+    if (runtime.role === 'host') {
+      clearLastStateSnapshot();
+    }
     updateDiagnosticsOverlay();
   }
 
@@ -589,6 +598,9 @@ if (
     }
     const connection = createConnectionRecord(peerId);
     runtime.connections.set(peerId, connection);
+    if (runtime.role === 'host') {
+      clearLastStateSnapshot();
+    }
     setupHostPeerConnection(connection).catch((error) => {
       console.error('[Net] Host connection failed', error);
       teardownConnection(peerId);
@@ -614,6 +626,9 @@ if (
         }
       }, RATE_LOG_INTERVAL_MS);
       connection.rateTimers.push(hostStateRateTimer);
+      if (runtime.role === 'host') {
+        clearLastStateSnapshot();
+      }
       updateDiagnosticsOverlay();
     };
     stateChannel.onclose = () => {
@@ -622,6 +637,9 @@ if (
         clearInterval(hostStateRateTimer);
         connection.rateTimers = connection.rateTimers.filter((timer) => timer !== hostStateRateTimer);
         hostStateRateTimer = null;
+      }
+      if (runtime.role === 'host') {
+        clearLastStateSnapshot();
       }
       updateDiagnosticsOverlay();
     };
@@ -841,6 +859,9 @@ if (
     if (!serialized) {
       return;
     }
+    if (serialized === runtime.lastStateSnapshotSerialized) {
+      return;
+    }
     let sentCount = 0;
     runtime.connections.forEach((connection) => {
       if (!connection || !connection.stateChannel) {
@@ -860,6 +881,7 @@ if (
     });
     if (sentCount > 0) {
       runtime.lastStateBroadcastAt = now;
+      runtime.lastStateSnapshotSerialized = serialized;
     }
   }
 
@@ -1221,6 +1243,7 @@ if (
     runtime.peerInputs = {};
     runtime.lastStateTimestamp = null;
     runtime.lastSnapshotLatencyMs = null;
+    clearLastStateSnapshot();
     updateDiagnosticsOverlay();
   }
 
