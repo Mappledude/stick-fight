@@ -193,6 +193,17 @@
           payload.push(data);
         }
 
+        if (diagnosticsActive && joystick && typeof scene.logJoyDiag === 'function') {
+          scene.logJoyDiag('joystick:deadzone', {
+            context: 'trace',
+            player: playerKey,
+            radius: typeof joystick.radius === 'number' ? joystick.radius : null,
+            deadzone: typeof joystick.deadzone === 'number' ? joystick.deadzone : null,
+            magnitude: vector.magnitude,
+            source: scene._joystickDeadzoneSource || 'default',
+          });
+        }
+
         if (index === 0 && overlay) {
           const format = (value, digits = 2) =>
             typeof value === 'number' && isFinite(value) ? value.toFixed(digits) : '0.00';
@@ -266,6 +277,7 @@
       this.deadzone =
         typeof config.deadzone === 'number' ? Math.max(0, config.deadzone) : JOYSTICK_DEADZONE;
       this.hitPadding = typeof config.hitPadding === 'number' ? config.hitPadding : 28;
+      this.playerKey = config.playerKey || null;
       this.pointerId = null;
       this.vector = new Phaser.Math.Vector2(0, 0);
       this.magnitude = 0;
@@ -390,6 +402,17 @@
         },
         this
       );
+
+      if (this.diagnosticsEnabled()) {
+        const source = scene && scene._joystickDeadzoneSource ? scene._joystickDeadzoneSource : 'default';
+        this.logDiagnostics('deadzone', {
+          context: 'create',
+          radius: this.radius,
+          deadzone: this.deadzone,
+          magnitude: this.magnitude,
+          source,
+        });
+      }
 
       this.scene.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
         this.reset();
@@ -530,12 +553,13 @@
     }
 
     logDiagnostics(eventType, details) {
+      const payload = Object.assign({ player: this.playerKey || null }, details);
       const scene = this.scene;
       if (scene && typeof scene.logJoyDiag === 'function') {
-        scene.logJoyDiag(`joystick:${eventType}`, details);
+        scene.logJoyDiag(`joystick:${eventType}`, payload);
         return;
       }
-      console.log('[VirtualJoystick]', eventType, details);
+      console.log('[VirtualJoystick]', eventType, payload);
     }
 
     withDiagnostics(eventType, pointer, handler) {
@@ -806,6 +830,8 @@
       const nav = typeof navigator !== 'undefined' ? navigator : null;
       const win = typeof window !== 'undefined' ? window : null;
 
+      this._joystickDeadzone = JOYSTICK_DEADZONE;
+      this._joystickDeadzoneSource = 'default';
       this._forceJoystick = false;
       this._forceKeyboard = false;
       this._joyDiagEnabled = false;
@@ -847,6 +873,8 @@
               },
             });
           }
+
+          this.applyJoyDiagDeadzoneOverride(params.get('dz'), '?dz=');
         } else {
           const searchLower = searchString.toLowerCase();
           this._forceJoystick = /[?&]forcejoystick=(1|true|yes|on)\b/.test(searchLower);
@@ -869,6 +897,10 @@
               },
             });
           }
+
+          const dzMatch = searchString.match(/[?&]dz=([^&#]*)/i);
+          const dzValue = dzMatch ? decodeURIComponent(dzMatch[1]) : null;
+          this.applyJoyDiagDeadzoneOverride(dzValue, '?dz=');
         }
       }
 
@@ -943,12 +975,72 @@
       this._joyDiagEnabled = !!safeConfig.enabled;
       if (!this._joyDiagEnabled) {
         this.resetJoyDiagModes();
+        this._joystickDeadzone = JOYSTICK_DEADZONE;
+        this._joystickDeadzoneSource = 'default';
         return;
       }
       this._joyDiagModes.noControls = !!modes.noControls;
       this._joyDiagModes.noJoystick = !!modes.noJoystick;
       this._joyDiagModes.joystickOnly = !!modes.joystickOnly;
       this._joyDiagModes.joyTest = !!modes.joyTest;
+    }
+
+    getJoystickDeadzone() {
+      const value = this._joystickDeadzone;
+      return typeof value === 'number' && isFinite(value) ? value : JOYSTICK_DEADZONE;
+    }
+
+    applyJoyDiagDeadzoneOverride(rawValue, sourceLabel) {
+      const defaultDeadzone = JOYSTICK_DEADZONE;
+      this._joystickDeadzone = defaultDeadzone;
+      this._joystickDeadzoneSource = 'default';
+
+      if (!this._joyDiagEnabled) {
+        return;
+      }
+
+      if (typeof rawValue !== 'string' || rawValue.trim() === '') {
+        return;
+      }
+
+      const parsed = parseFloat(rawValue);
+      if (!Number.isFinite(parsed)) {
+        this._joystickDeadzone = defaultDeadzone;
+        if (this.diagnosticsActive()) {
+          this.logJoyDiag('joystick:deadzone', {
+            context: 'config',
+            source: 'default',
+            raw: rawValue,
+            applied: this._joystickDeadzone,
+            default: defaultDeadzone,
+            overrideApplied: false,
+          });
+        }
+        return;
+      }
+
+      const minDeadzone = 0;
+      const maxDeadzone = 0.9;
+      const clamped = Phaser.Math.Clamp(parsed, minDeadzone, maxDeadzone);
+
+      this._joystickDeadzone = clamped;
+      this._joystickDeadzoneSource = sourceLabel || 'override';
+
+      if (this.diagnosticsActive()) {
+        const payload = {
+          context: 'config',
+          source: this._joystickDeadzoneSource,
+          raw: rawValue,
+          applied: clamped,
+          default: defaultDeadzone,
+          overrideApplied: true,
+          note: `${this._joystickDeadzoneSource} override active`,
+        };
+        if (clamped !== parsed) {
+          payload.requested = parsed;
+        }
+        this.logJoyDiag('joystick:deadzone', payload);
+      }
     }
 
     diagnosticsActive() {
@@ -2187,13 +2279,17 @@
       const createButtons = !joystickOnly;
 
       if (createJoysticks) {
+        const joystickRadius = this.touchButtonLayout.joystickRadius;
+        const joystickDeadzone = this.getJoystickDeadzone();
         const joystickP1 = new VirtualJoystick(this, 0, 0, {
-          radius: this.touchButtonLayout.joystickRadius,
-          deadzone: JOYSTICK_DEADZONE,
+          radius: joystickRadius,
+          deadzone: joystickDeadzone,
+          playerKey: 'p1',
         });
         const joystickP2 = new VirtualJoystick(this, 0, 0, {
-          radius: this.touchButtonLayout.joystickRadius,
-          deadzone: JOYSTICK_DEADZONE,
+          radius: joystickRadius,
+          deadzone: joystickDeadzone,
+          playerKey: 'p2',
         });
 
         const onJoystickInput = () => {
