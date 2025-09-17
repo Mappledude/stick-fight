@@ -4,6 +4,7 @@
   const PROTOCOL_VERSION = 1;
   const INPUT_SEND_INTERVAL_MS = 50;
   const STATE_SEND_INTERVAL_MS = 120;
+  const FALLBACK_STATE_MIN_INTERVAL_MS = 200;
   const INPUT_STALE_MS = 1500;
   const DIAG_UPDATE_INTERVAL_MS = 250;
   const RATE_LOG_INTERVAL_MS = 5000;
@@ -42,6 +43,8 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
     guestCandidateUnsub: null,
     stateBroadcastTimer: null,
     serverStepTimer: null,
+    hostTick: 0,
+    lastFallbackStateWriteAt: null,
   };
 
   function detectDiagnosticsFlag() {
@@ -234,6 +237,8 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
     });
 
     registry.fixedStep(dt);
+
+    runtime.hostTick = Number.isFinite(runtime.hostTick) ? runtime.hostTick + 1 : 1;
 
     const snapshot = registry.getPlayers();
     runtime.remotePlayers = snapshot
@@ -796,6 +801,8 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
   function startHostRuntime() {
     ensureHostRegistry();
     ensureHostServerPlayer(runtime.localPeerId);
+    runtime.hostTick = 0;
+    runtime.lastFallbackStateWriteAt = null;
     if (!runtime.serverStepTimer) {
       const interval = Math.max(1, Math.round(SERVER_FIXED_STEP_MS));
       runtime.serverStepTimer = setInterval(() => stepHostServer(), interval);
@@ -862,6 +869,7 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
       return;
     }
     let sentCount = 0;
+    let hasOpenStateChannel = false;
     runtime.connections.forEach((connection) => {
       if (!connection || !connection.stateChannel) {
         return;
@@ -869,6 +877,7 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
       if (connection.stateChannel.readyState !== 'open') {
         return;
       }
+      hasOpenStateChannel = true;
       try {
         connection.stateChannel.send(serialized);
         connection.lastStateSentAt = now;
@@ -880,7 +889,55 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
     });
     if (sentCount > 0) {
       runtime.lastStateBroadcastAt = now;
+      return;
     }
+
+    if (hasOpenStateChannel) {
+      return;
+    }
+
+    maybeWriteFallbackState(snapshot);
+  }
+
+  function maybeWriteFallbackState(snapshot) {
+    if (runtime.role !== 'host') {
+      return;
+    }
+    if (!runtime.roomRef) {
+      return;
+    }
+    if (!snapshot || typeof snapshot !== 'object') {
+      return;
+    }
+    const now = Date.now();
+    if (
+      Number.isFinite(runtime.lastFallbackStateWriteAt) &&
+      now - runtime.lastFallbackStateWriteAt < FALLBACK_STATE_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    runtime.lastFallbackStateWriteAt = now;
+
+    const net = getStickFightNet();
+    const fieldValue = net && net.state ? net.state.fieldValue : null;
+    const updatedAt =
+      fieldValue && typeof fieldValue.serverTimestamp === 'function'
+        ? fieldValue.serverTimestamp()
+        : new Date(now);
+
+    const payload = {
+      tick: Number.isFinite(runtime.hostTick) ? runtime.hostTick : 0,
+      state: snapshot,
+      updatedAt,
+    };
+
+    runtime.roomRef
+      .set(payload, { merge: true })
+      .catch((error) => {
+        console.error('[Net] Failed to write fallback state snapshot', error);
+        runtime.lastFallbackStateWriteAt = null;
+      });
   }
 
   function sendIceCandidate(docId, candidate, from) {
@@ -1235,6 +1292,8 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
       clearInterval(runtime.serverStepTimer);
       runtime.serverStepTimer = null;
     }
+    runtime.hostTick = 0;
+    runtime.lastFallbackStateWriteAt = null;
     runtime.registry = null;
     runtime.remotePlayers = [];
     runtime.remotePlayArea = null;
