@@ -286,6 +286,11 @@
     }
 
     logDiagnostics(eventType, details) {
+      const scene = this.scene;
+      if (scene && typeof scene.logJoyDiag === 'function') {
+        scene.logJoyDiag(`joystick:${eventType}`, details);
+        return;
+      }
       console.log('[VirtualJoystick]', eventType, details);
     }
 
@@ -305,8 +310,9 @@
           : { x: 0, y: 0 };
         const moved = newKnobPos.x !== prevKnobPos.x || newKnobPos.y !== prevKnobPos.y;
         this.logDiagnostics(eventType, {
+          eventType,
           pointerId,
-          localDelta,
+          local: localDelta,
           knob: { previous: prevKnobPos, next: newKnobPos },
           moved,
           result,
@@ -557,6 +563,11 @@
       this.safeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
       this.debugOverlayVisible = false;
       this.debugText = null;
+      this._joyDiagLogState = {
+        css: { create: false, resize: false },
+        depth: { create: false, resize: false },
+      };
+      this._joyTestLogPrinted = false;
       this._layoutReady = false;
       this._layoutReadyLogPrinted = false;
       this._resizeDebounceEvent = null;
@@ -569,6 +580,278 @@
         p1: { up: false, forward: false, back: false },
         p2: { up: false, forward: false, back: false },
       };
+    }
+
+    diagnosticsActive() {
+      return !!this._joyDiagEnabled;
+    }
+
+    logJoyDiag(topic, payload) {
+      if (!this.diagnosticsActive()) {
+        return;
+      }
+      if (typeof console === 'undefined' || !console) {
+        return;
+      }
+      const consoleFn = typeof console.info === 'function' ? console.info : console.log;
+      try {
+        consoleFn.call(console, `[JoyDiag] ${topic}`, payload);
+      } catch (error) {
+        console.log(`[JoyDiag] ${topic}`, payload, error);
+      }
+    }
+
+    runJoyDiagChecks(context) {
+      if (!this.diagnosticsActive()) {
+        return;
+      }
+      this.auditCssConfiguration(context);
+      this.auditDisplayDepths(context);
+    }
+
+    extractPointerId(pointer) {
+      if (!pointer) {
+        return null;
+      }
+      if (typeof pointer.id !== 'undefined') {
+        return pointer.id;
+      }
+      if (typeof pointer.pointerId !== 'undefined') {
+        return pointer.pointerId;
+      }
+      if (typeof pointer.identifier !== 'undefined') {
+        return pointer.identifier;
+      }
+      return 'mouse';
+    }
+
+    logRendererOverride() {
+      if (!this.diagnosticsActive()) {
+        return;
+      }
+      if (typeof window === 'undefined' || !window.location) {
+        return;
+      }
+      try {
+        const params = new URLSearchParams(window.location.search || '');
+        if (params.get('forceCanvas') === '1') {
+          this.logJoyDiag('renderer', 'forceCanvas=1 override active');
+        }
+      } catch (error) {
+        this.logJoyDiag('renderer', { error: error && error.message ? error.message : error });
+      }
+    }
+
+    auditCssConfiguration(context) {
+      if (!this.diagnosticsActive()) {
+        return;
+      }
+      const state = this._joyDiagLogState && this._joyDiagLogState.css;
+      const contextKey = context === 'resize' ? 'resize' : 'create';
+      if (state && state[contextKey]) {
+        return;
+      }
+      if (state) {
+        state[contextKey] = true;
+      }
+
+      const details = { context: contextKey, canvas: null, root: null };
+      if (
+        typeof window !== 'undefined' &&
+        window.getComputedStyle &&
+        typeof document !== 'undefined'
+      ) {
+        const canvas = this.sys && this.sys.game ? this.sys.game.canvas : null;
+        if (canvas) {
+          const canvasStyle = canvas.style || {};
+          const canvasStyles = window.getComputedStyle(canvas);
+          details.canvas = {
+            touchAction: canvasStyles.getPropertyValue('touch-action') || canvasStyle.touchAction || '',
+            overscrollBehavior:
+              canvasStyles.getPropertyValue('overscroll-behavior') || canvasStyle.overscrollBehavior || '',
+            userSelect:
+              canvasStyles.getPropertyValue('user-select') ||
+              canvasStyle.userSelect ||
+              canvasStyles.getPropertyValue('-webkit-user-select') ||
+              canvasStyle.webkitUserSelect ||
+              '',
+          };
+        }
+        const root = document && document.documentElement ? document.documentElement : null;
+        if (root) {
+          const rootStyle = root.style || {};
+          const rootStyles = window.getComputedStyle(root);
+          details.root = {
+            touchAction:
+              rootStyles.getPropertyValue('touch-action') || rootStyle.touchAction || '',
+            overscrollBehavior:
+              rootStyles.getPropertyValue('overscroll-behavior') || rootStyle.overscrollBehavior || '',
+            userSelect:
+              rootStyles.getPropertyValue('user-select') ||
+              rootStyle.userSelect ||
+              rootStyles.getPropertyValue('-webkit-user-select') ||
+              rootStyle.webkitUserSelect ||
+              '',
+          };
+        }
+      }
+
+      this.logJoyDiag('css', details);
+    }
+
+    auditDisplayDepths(context) {
+      if (!this.diagnosticsActive()) {
+        return;
+      }
+      const state = this._joyDiagLogState && this._joyDiagLogState.depth;
+      const contextKey = context === 'resize' ? 'resize' : 'create';
+      if (state && state[contextKey]) {
+        return;
+      }
+      if (state) {
+        state[contextKey] = true;
+      }
+
+      const children = this.children && this.children.list ? this.children.list : [];
+      const audit = [];
+      for (let index = 0; index < children.length; index += 1) {
+        const child = children[index];
+        if (!child) {
+          continue;
+        }
+        const entry = {
+          index,
+          type: child.type || (child.constructor ? child.constructor.name : 'Unknown'),
+          depth: typeof child.depth === 'number' ? child.depth : null,
+          name: child.name || null,
+          width: typeof child.displayWidth === 'number' ? child.displayWidth : null,
+          height: typeof child.displayHeight === 'number' ? child.displayHeight : null,
+        };
+        audit.push(entry);
+      }
+
+      this.logJoyDiag('depth', { context: contextKey, objects: audit });
+    }
+
+    ensureJoyDiagHudVisible() {
+      if (!this.diagnosticsActive()) {
+        return;
+      }
+      this.debugOverlayVisible = true;
+      this.updateDebugOverlay();
+    }
+
+    runJoyTestSimulation() {
+      if (!this.diagnosticsActive() || !this._joyDiagModes.joyTest) {
+        return;
+      }
+      if (!this._joyTestLogPrinted) {
+        this._joyTestLogPrinted = true;
+        this.logJoyDiag('joytest', 'Simulated joystick input active');
+      }
+
+      const now = this.time && typeof this.time.now === 'number' ? this.time.now : Date.now();
+      const phase = now / 1000;
+      const sine = Math.sin(phase);
+      const cosine = Math.cos(phase * 0.5);
+
+      const players = ['p1', 'p2'];
+      for (let i = 0; i < players.length; i += 1) {
+        const player = players[i];
+        const snapshot = this.joystickSnapshots[player];
+        if (!snapshot) {
+          continue;
+        }
+        snapshot.moveX = Phaser.Math.Clamp(sine, -1, 1);
+        snapshot.crouch = cosine > 0.6;
+        snapshot.jumpUp = cosine < -0.4;
+        snapshot.jumpForward = sine > 0.7;
+        snapshot.jumpBack = sine < -0.7;
+      }
+    }
+
+    getJoystickDiagnostics(player) {
+      const snapshot = this.joystickSnapshots[player];
+      const joystick = this.virtualJoysticks[player];
+      const vector = joystick ? joystick.getVector() : { x: 0, y: 0, magnitude: 0 };
+      const active = joystick ? joystick.isActive() : false;
+      const normX = Number.isFinite(vector.x) ? vector.x : 0;
+      const normY = Number.isFinite(vector.y) ? vector.y : 0;
+      const magnitude = Number.isFinite(vector.magnitude) ? vector.magnitude : 0;
+      const angle = active ? Phaser.Math.RadToDeg(Math.atan2(normY, normX)) : 0;
+      const input = this.getPlayerInput(player);
+      return {
+        player,
+        active,
+        snapshot,
+        normX,
+        normY,
+        magnitude,
+        angle,
+        buttons: input
+          ? {
+              punch: !!input.punch,
+              kick: !!input.kick,
+              crouch: !!input.crouch,
+            }
+          : { punch: false, kick: false, crouch: false },
+      };
+    }
+
+    renderDiagHUD() {
+      if (!this.diagnosticsActive()) {
+        return this.renderLegacyHUD();
+      }
+      const lines = [];
+      const renderer = this.sys && this.sys.game ? this.sys.game.config : null;
+      const renderType = renderer && typeof renderer.renderType === 'number' ? renderer.renderType : null;
+      const usingCanvas = renderType === Phaser.CANVAS;
+      if (usingCanvas) {
+        lines.push('Renderer: Canvas (forceCanvas=1)');
+      } else {
+        lines.push('Renderer: Auto');
+      }
+
+      const players = ['p1', 'p2'];
+      for (let i = 0; i < players.length; i += 1) {
+        const player = players[i];
+        const diag = this.getJoystickDiagnostics(player);
+        if (!diag.snapshot) {
+          continue;
+        }
+        const moveX = Number.isFinite(diag.snapshot.moveX) ? diag.snapshot.moveX : 0;
+        const parts = [`${player.toUpperCase()}:`];
+        parts.push(`mx=${moveX.toFixed(2)}`);
+        parts.push(`normX=${diag.normX.toFixed(2)}`);
+        parts.push(`normY=${diag.normY.toFixed(2)}`);
+        parts.push(`mag=${diag.magnitude.toFixed(2)}`);
+        parts.push(`angle=${diag.angle.toFixed(1)}`);
+        parts.push(`p=${diag.buttons.punch ? 'T' : 'F'}`);
+        parts.push(`k=${diag.buttons.kick ? 'T' : 'F'}`);
+        parts.push(`c=${diag.buttons.crouch ? 'T' : 'F'}`);
+        parts.push(`active=${diag.active ? 'T' : 'F'}`);
+        lines.push(parts.join(' '));
+      }
+      return lines.join('\n');
+    }
+
+    renderLegacyHUD() {
+      const format = (value) => (value ? 'T' : 'F');
+      const formatMove = (value) => {
+        const safe = Number.isFinite(value) ? value : 0;
+        return safe.toFixed(2);
+      };
+      const p1 = this.p1Input;
+      const p2 = this.p2Input;
+      const lines = [
+        `P1 MX:${formatMove(p1.moveX)} C:${format(p1.crouch)} JU:${format(p1.jumpUp)} JF:${format(
+          p1.jumpForward
+        )} JB:${format(p1.jumpBack)} P:${format(p1.punch)} K:${format(p1.kick)}`,
+        `P2 MX:${formatMove(p2.moveX)} C:${format(p2.crouch)} JU:${format(p2.jumpUp)} JF:${format(
+          p2.jumpForward
+        )} JB:${format(p2.jumpBack)} P:${format(p2.punch)} K:${format(p2.kick)}`,
+      ];
+      return lines.join('\n');
     }
 
     preload() {}
@@ -595,6 +878,8 @@
         consoleFn.call(console, `[JoyDiag] Active mode: ${modeSummary}`);
       }
 
+      this.logRendererOverride();
+
       this.titleText = centerText(this, 'Stick-Fight', -28, { fontSize: '56px', fontStyle: '700' });
       if (this.titleText && this.titleText.setInteractive) {
         this.titleText.setInteractive({ useHandCursor: false });
@@ -609,6 +894,13 @@
       this.createTouchControls();
       this.registerKeyboardControls();
       this.createDebugOverlay();
+
+      if (this.diagnosticsActive()) {
+        this.ensureJoyDiagHudVisible();
+        this.runJoyDiagChecks('create');
+      } else {
+        this.updateDebugOverlay();
+      }
 
       this.scale.on('resize', this.handleResize, this);
       this.handleResize(this.scale.gameSize);
@@ -852,6 +1144,10 @@
         this.refreshWorldBounds(size);
         this.clampFightersToWorld();
       }
+
+      if (this.diagnosticsActive()) {
+        this.runJoyDiagChecks('resize');
+      }
     }
 
     update(time, delta) {
@@ -999,6 +1295,8 @@
         prev.forward = forwardActive;
         prev.back = backActive;
       });
+
+      this.runJoyTestSimulation();
     }
 
     determineKeyboardMoveX(player) {
@@ -1303,30 +1601,56 @@
         }
         this.handleActionPress(player, key);
         this.updateActionHoldState(player, key);
+        if (this.diagnosticsActive()) {
+          const local = pointer
+            ? { x: pointer.x - button.x, y: pointer.y - button.y }
+            : null;
+          this.logJoyDiag('button:pointerdown', {
+            player,
+            key,
+            pointerId: this.extractPointerId(pointer),
+            eventType: pointer && pointer.event ? pointer.event.type : 'pointerdown',
+            local,
+          });
+        }
       };
 
-      const handlePointerEnd = (pointer) => {
+      const handlePointerEnd = (pointer, eventName) => {
         if (pointer && typeof pointer.id !== 'undefined') {
           pointerSet.delete(pointer.id);
         }
         this.updateActionHoldState(player, key);
         this.preventPointerDefault(pointer);
+        if (this.diagnosticsActive()) {
+          const local = pointer
+            ? { x: pointer.x - button.x, y: pointer.y - button.y }
+            : null;
+          this.logJoyDiag('button:pointerup', {
+            player,
+            key,
+            pointerId: this.extractPointerId(pointer),
+            eventType: eventName,
+            pointerEventType: pointer && pointer.event ? pointer.event.type : null,
+            local,
+          });
+        }
       };
 
       button.on('pointerdown', handlePointerDown);
+      const pointerEndHandlers = [];
       ['pointerup', 'pointerupoutside', 'pointerout', 'pointercancel', 'lostpointercapture'].forEach(
         (eventName) => {
-          button.on(eventName, handlePointerEnd);
+          const handler = (pointer) => handlePointerEnd(pointer, eventName);
+          pointerEndHandlers.push([eventName, handler]);
+          button.on(eventName, handler);
         }
       );
 
       this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
         button.off('pointerdown', handlePointerDown);
-        ['pointerup', 'pointerupoutside', 'pointerout', 'pointercancel', 'lostpointercapture'].forEach(
-          (eventName) => {
-            button.off(eventName, handlePointerEnd);
-          }
-        );
+        pointerEndHandlers.forEach(([eventName, handler]) => {
+          button.off(eventName, handler);
+        });
       });
     }
 
@@ -1690,26 +2014,17 @@
       if (!this.debugText) {
         return;
       }
-      const format = (value) => (value ? 'T' : 'F');
-      const formatMove = (value) => {
-        const safe = Number.isFinite(value) ? value : 0;
-        return safe.toFixed(2);
-      };
-      const p1 = this.p1Input;
-      const p2 = this.p2Input;
-      const lines = [
-        `P1 MX:${formatMove(p1.moveX)} C:${format(p1.crouch)} JU:${format(p1.jumpUp)} JF:${format(
-          p1.jumpForward
-        )} JB:${format(p1.jumpBack)} P:${format(p1.punch)} K:${format(p1.kick)}`,
-        `P2 MX:${formatMove(p2.moveX)} C:${format(p2.crouch)} JU:${format(p2.jumpUp)} JF:${format(
-          p2.jumpForward
-        )} JB:${format(p2.jumpBack)} P:${format(p2.punch)} K:${format(p2.kick)}`,
-      ];
-      this.debugText.setText(lines.join('\n'));
+      const hudText = this.renderDiagHUD();
+      this.debugText.setText(hudText || '');
       this.debugText.setVisible(this.debugOverlayVisible);
     }
 
     toggleDebugOverlay(forceState) {
+      if (this.diagnosticsActive()) {
+        this.debugOverlayVisible = true;
+        this.updateDebugOverlay();
+        return;
+      }
       if (typeof forceState === 'boolean') {
         this.debugOverlayVisible = forceState;
       } else {
