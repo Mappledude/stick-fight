@@ -77,6 +77,29 @@
     return null;
   };
 
+  const describeFirebaseConfig = () => {
+    const config = getFirebaseConfig();
+    const projectId = config && typeof config.projectId === 'string' ? config.projectId : 'missing';
+    const authDomain = config && typeof config.authDomain === 'string' ? config.authDomain : 'missing';
+    const apiKey = config && typeof config.apiKey === 'string' ? config.apiKey : '';
+    const apiKeyHead = apiKey ? apiKey.slice(0, 6) : 'missing';
+    return { config, projectId, authDomain, apiKeyHead };
+  };
+
+  const logConfigScope = (scope) => {
+    const { projectId, authDomain, apiKeyHead } = describeFirebaseConfig();
+    const message =
+      'scope=' +
+      scope +
+      ' projectId=' +
+      projectId +
+      ' authDomain=' +
+      authDomain +
+      ' apiKeyHead=' +
+      apiKeyHead;
+    bootLog('CFG', message);
+  };
+
   const ensureFirebaseApp = () => {
     if (NETWORK_DISABLED) {
       throw new Error('Networking disabled by query flags.');
@@ -334,6 +357,7 @@ function ensureAuthReady() {
   };
 
   const createRoom = async (options) => {
+    logConfigScope('room-create');
     await ensureAuthReady();
     const { auth, user } = await ensureSignedInUser();
     const currentUser = user || (auth && auth.currentUser);
@@ -364,6 +388,7 @@ function ensureAuthReady() {
   };
 
   const joinRoom = async (roomId, options) => {
+    logConfigScope('room-join');
     await ensureAuthReady();
     const firestore = ensureFirestore();
     const { auth, user } = await ensureSignedInUser();
@@ -467,6 +492,7 @@ function ensureAuthReady() {
   };
 
   const adminCreateRoom = async () => {
+    logConfigScope('admin-create-room');
     const { auth, user } = await ensureSignedInUser();
     const currentUser = user || (auth && auth.currentUser);
     if (!currentUser || !currentUser.uid) {
@@ -592,6 +618,7 @@ function ensureAuthReady() {
   };
 
   const startLobbyRoomsListener = async () => {
+    logConfigScope('lobby-listener');
     if (lobbyRoomsState.listening) {
       return;
     }
@@ -626,6 +653,7 @@ function ensureAuthReady() {
   };
 
   const handleAdminEntry = () => {
+    logConfigScope('admin-handle-entry');
     if (overlayState.isAdmin) {
       renderAdminPanel();
       return;
