@@ -27,6 +27,14 @@
       sw: false,
       initMeta: null,
     },
+    keyCheck: {
+      promise: null,
+      status: 'idle',
+      error: null,
+      result: null,
+      loggedStart: false,
+      loggedOk: false,
+    },
   };
 
   function detectScriptElement() {
@@ -300,6 +308,229 @@
     log('SW', 'status=' + status + ' controller=' + controller);
   }
 
+  function getApiKeyHead(value) {
+    if (typeof value !== 'string' || value === '') {
+      return 'missing';
+    }
+    return value.slice(0, 6);
+  }
+
+  function extractProjectIdFromResponse(data) {
+    if (!data || typeof data !== 'object') {
+      return null;
+    }
+    if (typeof data.projectId === 'string' && data.projectId !== '') {
+      return data.projectId;
+    }
+    if (typeof data.project_id === 'string' && data.project_id !== '') {
+      return data.project_id;
+    }
+    return null;
+  }
+
+  function buildV1KeyUrl(projectId, apiKey) {
+    return (
+      'https://identitytoolkit.googleapis.com/v1/projects/' +
+      encodeURIComponent(projectId) +
+      '/config?key=' +
+      encodeURIComponent(apiKey)
+    );
+  }
+
+  function buildV3KeyUrl(projectId, apiKey) {
+    return (
+      'https://www.googleapis.com/identitytoolkit/v3/relyingparty/getProjectConfig?key=' +
+      encodeURIComponent(apiKey) +
+      '&project=' +
+      encodeURIComponent(projectId)
+    );
+  }
+
+  function fetchProjectConfig(url, source) {
+    if (typeof fetch !== 'function') {
+      const fetchError = new Error('Fetch API is not available for Firebase key verification.');
+      fetchError.code = 'key/no-fetch';
+      fetchError.source = source;
+      fetchError.url = url;
+      return Promise.reject(fetchError);
+    }
+    return fetch(url)
+      .then(function (response) {
+        if (!response) {
+          const responseError = new Error('No response received when verifying Firebase key.');
+          responseError.code = 'key/no-response';
+          responseError.source = source;
+          responseError.url = url;
+          throw responseError;
+        }
+        if (response.status !== 200) {
+          const statusError = new Error('Firebase key verification failed with HTTP ' + response.status + '.');
+          statusError.code = 'key/http';
+          statusError.httpStatus = response.status;
+          statusError.source = source;
+          statusError.url = url;
+          throw statusError;
+        }
+        return response
+          .json()
+          .catch(function () {
+            return {};
+          })
+          .then(function (body) {
+            return {
+              body: body || {},
+              source: source,
+            };
+          });
+      })
+      .catch(function (error) {
+        if (!error || typeof error !== 'object') {
+          return Promise.reject(error);
+        }
+        if (!Object.prototype.hasOwnProperty.call(error, 'code')) {
+          error.code = 'key/fetch';
+        }
+        if (!Object.prototype.hasOwnProperty.call(error, 'source')) {
+          error.source = source;
+        }
+        if (!Object.prototype.hasOwnProperty.call(error, 'url')) {
+          error.url = url;
+        }
+        return Promise.reject(error);
+      });
+  }
+
+  function recordKeyCheckFailure(message, code, detail, originalError) {
+    state.keyCheck.status = 'error';
+    state.keyCheck.error = {
+      message: message,
+      code: code,
+      detail: detail || null,
+    };
+    state.keyCheck.result = null;
+    log('KEY][ERR', message);
+
+    const baseError = originalError && typeof originalError === 'object' ? originalError : new Error(message);
+    try {
+      baseError.message = message;
+    } catch (error) {
+      // Ignore if message is read-only.
+    }
+    baseError.code = baseError.code || code;
+    if (detail && !baseError.detail) {
+      baseError.detail = detail;
+    }
+    baseError.__keyCheckHandled = true;
+    return baseError;
+  }
+
+  function getKeyCheckStatus() {
+    return {
+      status: state.keyCheck.status,
+      error: state.keyCheck.error,
+      result: state.keyCheck.result,
+    };
+  }
+
+  function verifyKey(boot) {
+    resolveBoot(boot);
+    if (state.keyCheck.promise) {
+      return state.keyCheck.promise;
+    }
+
+    const config = ensureConfig(boot);
+    const projectId = config && typeof config.projectId === 'string' ? config.projectId : '';
+    const apiKey = config && typeof config.apiKey === 'string' ? config.apiKey : '';
+    const apiKeyHead = getApiKeyHead(apiKey);
+
+    if (!state.keyCheck.loggedStart) {
+      state.keyCheck.loggedStart = true;
+      log('KEY', 'check=start projectId=' + projectId + ' apiKeyHead=' + apiKeyHead);
+    }
+
+    if (!projectId || !apiKey) {
+      const failure = recordKeyCheckFailure(
+        'API key does not belong to projectId=' + (projectId || 'unknown') + ' (HTTP invalid-config)',
+        'key/invalid-config',
+        {
+          expectedProjectId: projectId || null,
+        }
+      );
+      state.keyCheck.promise = Promise.reject(failure);
+      return state.keyCheck.promise;
+    }
+
+    state.keyCheck.status = 'pending';
+    state.keyCheck.error = null;
+    state.keyCheck.result = null;
+
+    const v1Url = buildV1KeyUrl(projectId, apiKey);
+    const v3Url = buildV3KeyUrl(projectId, apiKey);
+
+    const verificationPromise = fetchProjectConfig(v1Url, 'v1')
+      .catch(function (primaryError) {
+        return fetchProjectConfig(v3Url, 'v3').catch(function (fallbackError) {
+          fallbackError.primaryError = primaryError;
+          throw fallbackError;
+        });
+      })
+      .then(function (result) {
+        const remoteProjectId = extractProjectIdFromResponse(result && result.body);
+        if (remoteProjectId === projectId) {
+          state.keyCheck.status = 'ok';
+          state.keyCheck.error = null;
+          state.keyCheck.result = {
+            projectId: remoteProjectId,
+            source: result ? result.source : null,
+          };
+          if (!state.keyCheck.loggedOk) {
+            state.keyCheck.loggedOk = true;
+            log('KEY', 'check=ok (matched project)');
+          }
+          return state.keyCheck.result;
+        }
+
+        const detail = {
+          expectedProjectId: projectId,
+          receivedProjectId: remoteProjectId || null,
+          source: result ? result.source : null,
+        };
+        const message =
+          'API key does not belong to projectId=' + projectId + ' (got=' + (remoteProjectId || 'missing') + ')';
+        throw recordKeyCheckFailure(message, 'key/mismatch', detail);
+      })
+      .catch(function (error) {
+        if (error && error.__keyCheckHandled) {
+          throw error;
+        }
+
+        const status =
+          typeof error === 'object' && error
+            ? typeof error.httpStatus === 'number'
+              ? error.httpStatus
+              : typeof error.status === 'number'
+              ? error.status
+              : null
+            : null;
+        const statusLabel = status === null ? 'network-error' : String(status);
+        const detail = {
+          expectedProjectId: projectId,
+          httpStatus: status,
+          source: error && typeof error === 'object' ? error.source : null,
+          url: error && typeof error === 'object' ? error.url : null,
+        };
+        throw recordKeyCheckFailure(
+          'API key does not belong to projectId=' + projectId + ' (HTTP ' + statusLabel + ')',
+          'key/http',
+          detail,
+          error && error instanceof Error ? error : null
+        );
+      });
+
+    state.keyCheck.promise = verificationPromise;
+    return verificationPromise;
+  }
+
   function updateInitLogMetadata(partial) {
     if (!state.logs.initMeta) {
       state.logs.initMeta = {
@@ -531,6 +762,8 @@
     getFirestore: ensureFirestore,
     getFieldValue: ensureFieldValue,
     getConfig: ensureConfig,
+    verifyKey: verifyKey,
+    getKeyCheckStatus: getKeyCheckStatus,
   };
 
   if (!global.__StickFightFirebaseBootstrap) {
