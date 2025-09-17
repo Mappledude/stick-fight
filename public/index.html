@@ -158,6 +158,40 @@
         measurementId: 'G-8X0PQR1XYZ',
       });
     </script>
+    <script>
+      (function () {
+        if (window.__firebaseConfigLogOnce) {
+          return;
+        }
+
+        const logConfigPresent = () => {
+          if (window.__firebaseConfigLogOnce) {
+            return;
+          }
+          window.__firebaseConfigLogOnce = true;
+          console.log('[HTML] configScript=present bundleOrder=ok');
+        };
+
+        if (window.__FIREBASE_CONFIG__) {
+          logConfigPresent();
+          return;
+        }
+
+        fetch('/__/firebase/init.js')
+          .then((response) => {
+            if (!response.ok) {
+              throw new Error('init.js not accessible');
+            }
+            return response.text();
+          })
+          .then(() => {
+            logConfigPresent();
+          })
+          .catch(() => {
+            /* noop */
+          });
+      })();
+    </script>
     <script src="joydiag-config.js" defer></script>
     <script src="firebase-config.js" defer></script>
     <script src="firebase-bootstrap.js" defer></script>
