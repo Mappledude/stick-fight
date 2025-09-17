@@ -390,6 +390,7 @@
 
       this._forceJoystick = false;
       this._forceKeyboard = false;
+      this._joyDiagEnabled = false;
 
       const parseDebugFlag = (value) => {
         if (typeof value !== 'string') {
@@ -404,10 +405,12 @@
           const params = new URLSearchParams(win.location.search);
           this._forceJoystick = parseDebugFlag(params.get('forceJoystick'));
           this._forceKeyboard = parseDebugFlag(params.get('forceKeyboard'));
+          this._joyDiagEnabled = parseDebugFlag(params.get('joydiag'));
         } else {
           const searchLower = win.location.search.toLowerCase();
           this._forceJoystick = /[?&]forcejoystick=(1|true|yes|on)\b/.test(searchLower);
           this._forceKeyboard = /[?&]forcekeyboard=(1|true|yes|on)\b/.test(searchLower);
+          this._joyDiagEnabled = /[?&]joydiag=(1|true|yes|on)\b/.test(searchLower);
         }
       }
 
@@ -1035,6 +1038,83 @@
           canvas._preventScrollAttached = true;
         }
       }
+      this.runJoyDiagStyleCheck(canvas);
+    }
+
+    runJoyDiagStyleCheck(canvas) {
+      if (!this._joyDiagEnabled || typeof window === 'undefined') {
+        return;
+      }
+      if (typeof window.getComputedStyle !== 'function' || typeof document === 'undefined') {
+        return;
+      }
+      if (this._joyDiagCssChecked) {
+        return;
+      }
+      this._joyDiagCssChecked = true;
+
+      const warn = (message) => {
+        console.warn(`[StickFight][joydiag] ${message}`);
+      };
+
+      const elements = [];
+
+      if (document.body) {
+        elements.push({ element: document.body, label: 'document.body' });
+      } else {
+        warn('document.body is not available for CSS checks.');
+      }
+
+      const gameRoot = document.getElementById('game-root');
+      const gameRootParent = gameRoot ? gameRoot.parentElement : null;
+      if (gameRootParent) {
+        if (gameRootParent !== document.body) {
+          elements.push({ element: gameRootParent, label: '#game-root parent' });
+        }
+      } else {
+        warn('Unable to locate the #game-root parent element.');
+      }
+
+      if (canvas) {
+        elements.push({ element: canvas, label: 'canvas' });
+      } else {
+        warn('Game canvas is not available for CSS checks.');
+      }
+
+      const checkProperty = (styles, label, property, expected) => {
+        const value = styles.getPropertyValue(property);
+        const normalized = typeof value === 'string' ? value.trim() : '';
+        if (!normalized) {
+          warn(`${label} is missing ${property}; expected "${expected}".`);
+          return;
+        }
+        if (normalized !== expected) {
+          warn(`${label} has ${property}="${normalized}"; expected "${expected}".`);
+        }
+      };
+
+      elements.forEach(({ element, label }) => {
+        if (!element) {
+          return;
+        }
+        const styles = window.getComputedStyle(element);
+        if (!styles) {
+          warn(`Unable to read computed styles for ${label}.`);
+          return;
+        }
+        checkProperty(styles, label, 'touch-action', 'none');
+        checkProperty(styles, label, 'overscroll-behavior', 'none');
+
+        const userSelect = styles.getPropertyValue('user-select');
+        const webkitUserSelect = styles.getPropertyValue('-webkit-user-select');
+        const normalizedUserSelect = typeof userSelect === 'string' ? userSelect.trim() : '';
+        const normalizedWebkitUserSelect =
+          typeof webkitUserSelect === 'string' ? webkitUserSelect.trim() : '';
+        if (normalizedUserSelect !== 'none' && normalizedWebkitUserSelect !== 'none') {
+          const currentValue = normalizedUserSelect || normalizedWebkitUserSelect || 'unset';
+          warn(`${label} has user-select="${currentValue}"; expected "none".`);
+        }
+      });
     }
 
     createTouchControls() {
