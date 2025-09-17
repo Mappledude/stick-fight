@@ -863,7 +863,7 @@
 
     renderDiagHUD() {
       if (!this.diagnosticsActive()) {
-        return this.renderLegacyHUD();
+        return '';
       }
       const lines = [];
       const renderer = this.sys && this.sys.game ? this.sys.game.config : null;
@@ -875,6 +875,8 @@
         lines.push('Renderer: Auto');
       }
 
+      const formatButton = (pressed) => (pressed ? 'YES' : 'NO').padEnd(3, ' ');
+
       const players = ['p1', 'p2'];
       for (let i = 0; i < players.length; i += 1) {
         const player = players[i];
@@ -883,17 +885,20 @@
           continue;
         }
         const moveX = Number.isFinite(diag.snapshot.moveX) ? diag.snapshot.moveX : 0;
-        const parts = [`${player.toUpperCase()}:`];
-        parts.push(`mx=${moveX.toFixed(2)}`);
-        parts.push(`normX=${diag.normX.toFixed(2)}`);
-        parts.push(`normY=${diag.normY.toFixed(2)}`);
-        parts.push(`mag=${diag.magnitude.toFixed(2)}`);
-        parts.push(`angle=${diag.angle.toFixed(1)}`);
-        parts.push(`p=${diag.buttons.punch ? 'T' : 'F'}`);
-        parts.push(`k=${diag.buttons.kick ? 'T' : 'F'}`);
-        parts.push(`c=${diag.buttons.crouch ? 'T' : 'F'}`);
-        parts.push(`active=${diag.active ? 'T' : 'F'}`);
-        lines.push(parts.join(' '));
+        if (lines.length) {
+          lines.push('');
+        }
+        const buttonLine =
+          `  Pressed: Punch ${formatButton(diag.buttons.punch)}  Kick ${formatButton(diag.buttons.kick)}  Crouch ${formatButton(diag.buttons.crouch)}`;
+        const normLine = `  normX: ${diag.normX.toFixed(2)}    normY: ${diag.normY.toFixed(2)}`;
+        const angleLine = `  angle: ${diag.angle.toFixed(1)}°    magnitude: ${diag.magnitude.toFixed(2)}`;
+        const stateLine = `  moveX: ${moveX.toFixed(2)}    active: ${diag.active ? 'yes' : 'no'}`;
+
+        lines.push(`${player.toUpperCase()}`);
+        lines.push(buttonLine);
+        lines.push(normLine);
+        lines.push(angleLine);
+        lines.push(stateLine);
       }
       return lines.join('\n');
     }
@@ -2059,11 +2064,15 @@
       const text = this.add
         .text(0, 0, '', {
           fontFamily: 'Menlo, Monaco, Consolas, monospace',
-          fontSize: '16px',
-          color: '#00e7ff',
-          align: 'center',
+          fontSize: '15px',
+          color: '#e6f6ff',
+          align: 'left',
+          backgroundColor: 'rgba(6, 14, 22, 0.75)',
         })
-        .setOrigin(0.5, 0);
+        .setOrigin(0, 0);
+      text.setStyle({ stroke: '#0bb4ff', strokeThickness: 1 });
+      text.setPadding(10, 8, 14, 10);
+      text.setLineSpacing(6);
       text.setScrollFactor(0);
       text.setDepth(40);
       text.setAlpha(1);
@@ -2077,20 +2086,26 @@
       if (!this.debugText) {
         return;
       }
-      const { width } = this.scale.gameSize;
       const safeInsets = this.safeAreaInsets || {};
       const topInset = typeof safeInsets.top === 'number' ? safeInsets.top : 0;
+      const leftInset = typeof safeInsets.left === 'number' ? safeInsets.left : 0;
       const topOffset = topInset + 12;
-      this.debugText.setPosition(width / 2, topOffset);
+      const leftOffset = leftInset + 12;
+      this.debugText.setPosition(leftOffset, topOffset);
     }
 
     updateDebugOverlay() {
       if (!this.debugText) {
         return;
       }
+      if (!this.debugOverlayVisible || !this.diagnosticsActive()) {
+        this.debugText.setText('');
+        this.debugText.setVisible(false);
+        return;
+      }
       const hudText = this.renderDiagHUD();
       this.debugText.setText(hudText || '');
-      this.debugText.setVisible(this.debugOverlayVisible);
+      this.debugText.setVisible(true);
     }
 
     toggleDebugOverlay(forceState) {
