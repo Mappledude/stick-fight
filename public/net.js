@@ -68,30 +68,38 @@
       ? global.__StickFightFirebaseBootstrap
       : null;
 
-  let firebaseBootstrapEnv = null;
+  const FirebaseConfigModule =
+    global && typeof global.__StickFightFirebaseConfigModule === 'object'
+      ? global.__StickFightFirebaseConfigModule
+      : null;
 
-  const ensureFirebaseEnv = () => {
-    if (NETWORK_DISABLED) {
-      throw new Error('Networking disabled by query flags.');
+  const showFatalBanner = (message) => {
+    if (Boot && typeof Boot.error === 'function') {
+      Boot.error(new Error(message), 'AUTH');
+      return;
     }
-    if (firebaseBootstrapEnv) {
-      return firebaseBootstrapEnv;
+    if (typeof console !== 'undefined' && console && typeof console.error === 'function') {
+      console.error('[BANNER] ' + message);
     }
-    if (!FirebaseBootstrap || typeof FirebaseBootstrap.bootstrap !== 'function') {
-      throw new Error('Firebase bootstrap helper unavailable.');
+  };
+
+  const resolveFirebaseConfig = () => {
+    if (FirebaseBootstrap && typeof FirebaseBootstrap.getFirebaseConfig === 'function') {
+      return FirebaseBootstrap.getFirebaseConfig();
     }
-    firebaseBootstrapEnv = FirebaseBootstrap.bootstrap(Boot);
-    return firebaseBootstrapEnv;
+    if (FirebaseConfigModule && typeof FirebaseConfigModule.getFirebaseConfig === 'function') {
+      return FirebaseConfigModule.getFirebaseConfig();
+    }
+    if (global && typeof global.getFirebaseConfig === 'function') {
+      return global.getFirebaseConfig();
+    }
+    return null;
   };
 
   const describeFirebaseConfig = () => {
     let config = null;
     try {
-      if (FirebaseBootstrap && typeof FirebaseBootstrap.getConfig === 'function') {
-        config = FirebaseBootstrap.getConfig(Boot);
-      } else if (firebaseBootstrapEnv) {
-        config = firebaseBootstrapEnv.config;
-      }
+      config = resolveFirebaseConfig();
     } catch (error) {
       config = null;
     }
@@ -116,31 +124,46 @@
     bootLog('CFG', message);
   };
 
+  let firebaseAppInstance = null;
+
+  const ensureFirebaseApp = () => {
+    if (NETWORK_DISABLED) {
+      throw new Error('Networking disabled by query flags.');
+    }
+    if (firebaseAppInstance) {
+      return firebaseAppInstance;
+    }
+    if (!FirebaseBootstrap || typeof FirebaseBootstrap.initFirebase !== 'function') {
+      throw new Error('Firebase bootstrap helper unavailable.');
+    }
+    firebaseAppInstance = FirebaseBootstrap.initFirebase();
+    return firebaseAppInstance;
+  };
+
   const firebaseNamespace = () => {
-    if (firebaseBootstrapEnv && firebaseBootstrapEnv.firebase) {
-      return firebaseBootstrapEnv.firebase;
+    if (typeof global.firebase !== 'undefined') {
+      return global.firebase;
     }
-    if (!FirebaseBootstrap || typeof FirebaseBootstrap.bootstrap !== 'function') {
-      return typeof global.firebase !== 'undefined' ? global.firebase : null;
-    }
-    try {
-      return ensureFirebaseEnv().firebase;
-    } catch (error) {
-      return typeof global.firebase !== 'undefined' ? global.firebase : null;
-    }
+    return null;
   };
 
   const ensureFirestore = () => {
     if (netState.firestore) {
       return netState.firestore;
     }
-    const env = ensureFirebaseEnv();
-    const firestoreInstance = env && env.firestore ? env.firestore : null;
+    const firebase = firebaseNamespace();
+    if (!firebase || typeof firebase.firestore !== 'function') {
+      throw new Error('Firestore SDK is not available.');
+    }
+    const app = ensureFirebaseApp();
+    const firestoreInstance = firebase.firestore(app);
     if (!firestoreInstance) {
       throw new Error('Firestore SDK is not available.');
     }
     netState.firestore = firestoreInstance;
-    netState.fieldValue = env.fieldValue || (env.firebase && env.firebase.firestore ? env.firebase.firestore.FieldValue : null);
+    if (!netState.fieldValue && firebase.firestore && firebase.firestore.FieldValue) {
+      netState.fieldValue = firebase.firestore.FieldValue;
+    }
     return firestoreInstance;
   };
 
@@ -186,14 +209,22 @@ function ensureAuth() {
   if (NETWORK_DISABLED) {
     throw new Error('Networking disabled by query flags.');
   }
-  if (_authInstance) return _authInstance;
+  if (_authInstance) {
+    return _authInstance;
+  }
 
-  const env = ensureFirebaseEnv();
-  if (!env || !env.auth) {
+  const firebase = firebaseNamespace();
+  if (!firebase || typeof firebase.auth !== 'function') {
     throw new Error('Firebase Auth SDK is not available.');
   }
 
-  _authInstance = env.auth;
+  const app = ensureFirebaseApp();
+  const authInstance = firebase.auth(app);
+  if (!authInstance) {
+    throw new Error('Firebase Auth SDK is not available.');
+  }
+
+  _authInstance = authInstance;
   bootLog('AUTH', 'auth-instance-ready');
   return _authInstance;
 }
@@ -209,18 +240,14 @@ async function ensureSignedInUser() {
 
   // Already signed in?
   if (auth.currentUser) {
-    bootLog('AUTH', 'current-user', { uid: auth.currentUser.uid || null });
+    const uid = auth.currentUser.uid || 'missing';
+    bootLog('AUTH', `result code=ok uid=${uid}`);
     return { auth, user: auth.currentUser };
   }
 
-  // Another call is already signing in? await it.
   if (_signInPromise) {
-    await _signInPromise;
-    if (!auth.currentUser) {
-      throw new Error('Anonymous sign-in finished but no currentUser present.');
-    }
-    bootLog('AUTH', 'sign-in-shared');
-    return { auth, user: auth.currentUser };
+    const user = await _signInPromise;
+    return { auth, user };
   }
 
   // Start a new anonymous sign-in, memoized.
@@ -234,26 +261,22 @@ async function ensureSignedInUser() {
     .then((cred) => {
       _signInPromise = null;
       const user = (cred && cred.user) || auth.currentUser;
-      if (!user) throw new Error('Failed to sign in anonymously.');
+      if (!user) {
+        throw new Error('no-user-after-anon');
+      }
       const uid = user.uid || 'missing';
       bootLog('AUTH', `result code=ok uid=${uid}`);
       return user;
     })
     .catch((err) => {
       _signInPromise = null;
-      const code = err && typeof err.code === 'string' ? err.code : 'unknown';
-      const rawMessage = err && typeof err.message === 'string' ? err.message : '';
-      const message = rawMessage || (err ? String(err) : 'Failed to sign in anonymously.');
-      bootLog('AUTH', `result code=${code} message=${message}`);
-      const combinedMessage = `Firebase Auth failed (code=${code}): ${message}`;
-      const authError = new Error(combinedMessage);
-      if (code && typeof code === 'string') {
-        authError.code = code;
+      const code = err && typeof err.code === 'string' ? err.code : 'error';
+      const rawMessage = err && typeof err.message === 'string' ? err.message : String(err || 'auth-error');
+      if (typeof console !== 'undefined' && console && typeof console.error === 'function') {
+        console.error('[AUTH] result code=' + code + ' message=' + rawMessage);
       }
-      if (Boot && typeof Boot.error === 'function') {
-        Boot.error(authError, 'AUTH');
-      }
-      throw authError;
+      showFatalBanner('Auth failed: ' + code);
+      throw err;
     });
 
   const user = await _signInPromise;

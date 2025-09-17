@@ -3,82 +3,64 @@ const assert = require('node:assert/strict');
 
 const firebaseConfigModule = require('../public/firebase-config.js');
 
-const INLINE_CONFIG = firebaseConfigModule.__test.getInlineConfig();
-
-const WINDOW_CONFIG = Object.freeze({
-  apiKey: 'AIzaSyProdConfigApiKey1234567890',
-  authDomain: 'stick-fight-prod.firebaseapp.com',
-  projectId: 'stick-fight-prod',
-  storageBucket: 'stick-fight-prod.appspot.com',
-  messagingSenderId: '999999999999',
-  appId: '1:999999999999:web:prodappid123456',
-  measurementId: 'G-PROD12345',
-});
-
-function withNodeEnv(value, fn) {
-  const previous = process.env.NODE_ENV;
-  if (typeof value === 'undefined') {
-    delete process.env.NODE_ENV;
-  } else {
-    process.env.NODE_ENV = value;
-  }
-
-  try {
-    fn();
-  } finally {
-    if (typeof previous === 'undefined') {
-      delete process.env.NODE_ENV;
-    } else {
-      process.env.NODE_ENV = previous;
-    }
-  }
+function resetGlobals() {
+  delete global.firebase;
+  delete global.__FIREBASE_CONFIG__;
 }
 
-test('production environment uses window config by default', () => {
-  withNodeEnv('production', () => {
-    const scope = {
-      location: { search: '' },
-      __FIREBASE_CONFIG__: WINDOW_CONFIG,
-    };
-
-    const result = firebaseConfigModule.resolveFirebaseConfig(scope, INLINE_CONFIG);
-
-    assert.equal(result.source, 'window');
-    assert.equal(result.config.projectId, WINDOW_CONFIG.projectId);
-  });
+test('throws when no Firebase config is available', () => {
+  resetGlobals();
+  assert.throws(() => {
+    firebaseConfigModule.getFirebaseConfig();
+  }, /missing=window.__FIREBASE_CONFIG__/);
 });
 
-test('production environment ignores inline override', () => {
-  withNodeEnv('production', () => {
-    const scope = {
-      location: { search: '?useInline=1' },
-      __FIREBASE_CONFIG__: WINDOW_CONFIG,
-    };
-
-    const result = firebaseConfigModule.resolveFirebaseConfig(scope, INLINE_CONFIG);
-
-    assert.equal(result.source, 'window');
-    assert.equal(result.config.projectId, WINDOW_CONFIG.projectId);
+test('reuses existing firebase app options when present', () => {
+  resetGlobals();
+  const options = Object.freeze({
+    apiKey: 'A'.repeat(20),
+    authDomain: 'stick-fight.firebaseapp.com',
+    projectId: 'stick-fight',
+    appId: '1:123:web:abc',
+    storageBucket: 'stick-fight.appspot.com',
   });
-});
-
-test('non-production inline override is respected', () => {
-  withNodeEnv('development', () => {
-    const scope = {
-      location: { search: '?useInline=1' },
-    };
-
-    const infoLogs = [];
-    const loggers = {
-      info: (line) => {
-        infoLogs.push(line);
+  global.firebase = {
+    apps: [
+      {
+        options,
       },
-    };
+    ],
+  };
 
-    const result = firebaseConfigModule.resolveFirebaseConfig(scope, INLINE_CONFIG, loggers);
+  const result = firebaseConfigModule.getFirebaseConfig();
 
-    assert.equal(result.source, 'inline-dev');
-    assert.equal(result.config.projectId, INLINE_CONFIG.projectId);
-    assert.ok(infoLogs.some((line) => /source=inline-dev/.test(line)));
-  });
+  assert.equal(result, options);
+});
+
+test('reads window config when firebase app is not initialized', () => {
+  resetGlobals();
+  global.__FIREBASE_CONFIG__ = {
+    apiKey: 'B'.repeat(24),
+    authDomain: 'stick-fight.web.app',
+    projectId: 'stick-fight',
+    appId: '1:456:web:def',
+    storageBucket: 'stick-fight.appspot.com',
+  };
+
+  const result = firebaseConfigModule.getFirebaseConfig();
+
+  assert.equal(result.projectId, 'stick-fight');
+  assert.equal(result.appId, '1:456:web:def');
+});
+
+test('throws when config is missing required fields', () => {
+  resetGlobals();
+  global.__FIREBASE_CONFIG__ = {
+    apiKey: 'short',
+    projectId: 'missing-fields',
+  };
+
+  assert.throws(() => {
+    firebaseConfigModule.getFirebaseConfig();
+  }, /invalid keys/);
 });

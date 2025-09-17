@@ -231,58 +231,17 @@
       }
     </style>
     <script src="boot.js"></script>
+    <script defer src="/__/firebase/10.12.2/firebase-app-compat.js"></script>
+    <script defer src="/__/firebase/10.12.2/firebase-auth-compat.js"></script>
+    <script defer src="/__/firebase/10.12.2/firebase-firestore-compat.js"></script>
+    <script defer src="/__/firebase/init.js"></script>
+    <script>
+      console.info('[HTML] configScript=present bundleOrder=ok');
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js" defer></script>
-    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js" defer></script>
-    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js" defer></script>
-    <script>
-      window.__FIREBASE_CONFIG__ = Object.freeze({
-        apiKey: 'AIzaSyCTrS0i1Xz9Ll9cSPYnS3sh2g6Pfm7eNcQ',
-        authDomain: 'stick-fight-pigeon.firebaseapp.com',
-        projectId: 'stick-fight-pigeon',
-        storageBucket: 'stick-fight-pigeon.appspot.com',
-        messagingSenderId: '1035698723456',
-        appId: '1:1035698723456:web:13b6cf2b2a9f4e12a8c7b1',
-        measurementId: 'G-8X0PQR1XYZ',
-      });
-    </script>
-    <script>
-      (function () {
-        if (window.__firebaseConfigLogOnce) {
-          return;
-        }
-
-        const logConfigPresent = () => {
-          if (window.__firebaseConfigLogOnce) {
-            return;
-          }
-          window.__firebaseConfigLogOnce = true;
-          console.log('[HTML] configScript=present bundleOrder=ok');
-        };
-
-        if (window.__FIREBASE_CONFIG__) {
-          logConfigPresent();
-          return;
-        }
-
-        fetch('/__/firebase/init.js')
-          .then((response) => {
-            if (!response.ok) {
-              throw new Error('init.js not accessible');
-            }
-            return response.text();
-          })
-          .then(() => {
-            logConfigPresent();
-          })
-          .catch(() => {
-            /* noop */
-          });
-      })();
-    </script>
     <script src="joydiag-config.js" defer></script>
-    <script src="firebase-config.js" defer></script>
-    <script src="firebase-bootstrap.js" defer></script>
+    <script type="module" src="firebase-config.js"></script>
+    <script type="module" src="firebase-bootstrap.js"></script>
     <script src="net.js" defer></script>
     <script src="net-server.js" defer></script>
     <script src="netplay.js" defer></script>
