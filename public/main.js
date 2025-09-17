@@ -390,6 +390,13 @@
 
       this._forceJoystick = false;
       this._forceKeyboard = false;
+      this._joyDiagEnabled = false;
+      this._joyDiagModes = {
+        noControls: false,
+        noJoystick: false,
+        joystickOnly: false,
+        joyTest: false,
+      };
 
       const parseDebugFlag = (value) => {
         if (typeof value !== 'string') {
@@ -404,10 +411,20 @@
           const params = new URLSearchParams(win.location.search);
           this._forceJoystick = parseDebugFlag(params.get('forceJoystick'));
           this._forceKeyboard = parseDebugFlag(params.get('forceKeyboard'));
+          this._joyDiagEnabled = parseDebugFlag(params.get('joydiag'));
+          this._joyDiagModes.noControls = parseDebugFlag(params.get('nocontrols'));
+          this._joyDiagModes.noJoystick = parseDebugFlag(params.get('nojoystick'));
+          this._joyDiagModes.joystickOnly = parseDebugFlag(params.get('joyonly'));
+          this._joyDiagModes.joyTest = parseDebugFlag(params.get('joytest'));
         } else {
           const searchLower = win.location.search.toLowerCase();
           this._forceJoystick = /[?&]forcejoystick=(1|true|yes|on)\b/.test(searchLower);
           this._forceKeyboard = /[?&]forcekeyboard=(1|true|yes|on)\b/.test(searchLower);
+          this._joyDiagEnabled = /[?&]joydiag=(1|true|yes|on)\b/.test(searchLower);
+          this._joyDiagModes.noControls = /[?&]nocontrols=(1|true|yes|on)\b/.test(searchLower);
+          this._joyDiagModes.noJoystick = /[?&]nojoystick=(1|true|yes|on)\b/.test(searchLower);
+          this._joyDiagModes.joystickOnly = /[?&]joyonly=(1|true|yes|on)\b/.test(searchLower);
+          this._joyDiagModes.joyTest = /[?&]joytest=(1|true|yes|on)\b/.test(searchLower);
         }
       }
 
@@ -455,6 +472,25 @@
 
     create() {
       this.cameras.main.setBackgroundColor('#111');
+
+      if (this._joyDiagEnabled && typeof console !== 'undefined' && console) {
+        const modes = [];
+        if (this._joyDiagModes.noControls) {
+          modes.push('nocontrols');
+        }
+        if (this._joyDiagModes.noJoystick) {
+          modes.push('nojoystick');
+        }
+        if (this._joyDiagModes.joystickOnly) {
+          modes.push('joyonly');
+        }
+        if (this._joyDiagModes.joyTest) {
+          modes.push('joytest');
+        }
+        const modeSummary = modes.length > 0 ? modes.join(', ') : 'default';
+        const consoleFn = typeof console.info === 'function' ? console.info : console.log;
+        consoleFn.call(console, `[JoyDiag] Active mode: ${modeSummary}`);
+      }
 
       this.titleText = centerText(this, 'Stick-Fight', -28, { fontSize: '56px', fontStyle: '700' });
       if (this.titleText && this.titleText.setInteractive) {
@@ -1038,6 +1074,10 @@
     }
 
     createTouchControls() {
+      if (this._joyDiagModes.noControls) {
+        return;
+      }
+
       if (this.input) {
         this.input.addPointer(7);
       }
@@ -1051,41 +1091,52 @@
         return button;
       };
 
-      const joystickP1 = new VirtualJoystick(this, 0, 0, {
-        radius: this.touchButtonLayout.joystickRadius,
-        deadzone: JOYSTICK_DEADZONE,
-      });
-      const joystickP2 = new VirtualJoystick(this, 0, 0, {
-        radius: this.touchButtonLayout.joystickRadius,
-        deadzone: JOYSTICK_DEADZONE,
-      });
+      const joystickOnly = this._joyDiagModes.joystickOnly;
+      const createJoysticks = joystickOnly || !this._joyDiagModes.noJoystick;
+      const createButtons = !joystickOnly;
 
-      const onJoystickInput = () => {
-        if (this._forceKeyboard) {
-          return;
-        }
-        if (this._keyboardDetected) {
-          this._keyboardDetected = false;
-          this.updateTouchControlsVisibility();
-        } else if (this._forceJoystick) {
-          this.updateTouchControlsVisibility();
-        }
-      };
+      if (createJoysticks) {
+        const joystickP1 = new VirtualJoystick(this, 0, 0, {
+          radius: this.touchButtonLayout.joystickRadius,
+          deadzone: JOYSTICK_DEADZONE,
+        });
+        const joystickP2 = new VirtualJoystick(this, 0, 0, {
+          radius: this.touchButtonLayout.joystickRadius,
+          deadzone: JOYSTICK_DEADZONE,
+        });
 
-      joystickP1.on('joystickstart', onJoystickInput);
-      joystickP2.on('joystickstart', onJoystickInput);
-      joystickP1.on('joystickmove', () => {});
-      joystickP2.on('joystickmove', () => {});
+        const onJoystickInput = () => {
+          if (this._forceKeyboard) {
+            return;
+          }
+          if (this._keyboardDetected) {
+            this._keyboardDetected = false;
+            this.updateTouchControlsVisibility();
+          } else if (this._forceJoystick) {
+            this.updateTouchControlsVisibility();
+          }
+        };
 
-      this.virtualJoysticks.p1 = joystickP1;
-      this.virtualJoysticks.p2 = joystickP2;
-      this.joystickList.push(joystickP1, joystickP2);
+        joystickP1.on('joystickstart', onJoystickInput);
+        joystickP2.on('joystickstart', onJoystickInput);
+        joystickP1.on('joystickmove', () => {});
+        joystickP2.on('joystickmove', () => {});
 
-      createButton('p1', 'punch', 'Punch', { fontSize: '26px' });
-      createButton('p1', 'kick', 'Kick', { fontSize: '26px' });
+        this.virtualJoysticks.p1 = joystickP1;
+        this.virtualJoysticks.p2 = joystickP2;
+        this.joystickList.push(joystickP1, joystickP2);
+      } else {
+        this.virtualJoysticks.p1 = null;
+        this.virtualJoysticks.p2 = null;
+      }
 
-      createButton('p2', 'punch', 'Punch', { fontSize: '26px' });
-      createButton('p2', 'kick', 'Kick', { fontSize: '26px' });
+      if (createButtons) {
+        createButton('p1', 'punch', 'Punch', { fontSize: '26px' });
+        createButton('p1', 'kick', 'Kick', { fontSize: '26px' });
+
+        createButton('p2', 'punch', 'Punch', { fontSize: '26px' });
+        createButton('p2', 'kick', 'Kick', { fontSize: '26px' });
+      }
 
       this.positionTouchButtons();
       this.updateTouchControlsVisibility();
