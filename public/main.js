@@ -2,7 +2,18 @@
   const SPEED = 220;
   const ACCEL = 1200;
   const FRICTION = 1600;
+  const AIR_ACCEL = 620;
+  const AIR_DRAG = 2.25;
   const MAX_VEL = 240;
+  const JUMP_SPEED = 560;
+  const JUMP_HORIZONTAL_SPEED = 260;
+  const CROUCH_SPEED_SCALE = 0.35;
+  const JOYSTICK_RADIUS = 92;
+  const JOYSTICK_DEADZONE = 0.22;
+  const JOYSTICK_JUMP_THRESHOLD = 0.48;
+  const JOYSTICK_JUMP_HORIZONTAL_THRESHOLD = 0.32;
+  const JOYSTICK_CROUCH_THRESHOLD = 0.45;
+  const GRAVITY_Y = 2200;
   const MIN_LAYOUT_WIDTH = 320;
   const MIN_LAYOUT_HEIGHT = 180;
   const LAYOUT_POLL_INTERVAL = 16;
@@ -48,6 +59,174 @@
     return text;
   };
 
+  class VirtualJoystick extends Phaser.GameObjects.Container {
+    constructor(scene, x, y, config = {}) {
+      super(scene, x, y);
+
+      scene.add.existing(this);
+      this.radius = config.radius || JOYSTICK_RADIUS;
+      this.innerRadius = config.innerRadius || Math.max(this.radius * 0.4, 28);
+      this.deadzone =
+        typeof config.deadzone === 'number' ? Math.max(0, config.deadzone) : JOYSTICK_DEADZONE;
+      this.hitPadding = typeof config.hitPadding === 'number' ? config.hitPadding : 28;
+      this.pointerId = null;
+      this.vector = new Phaser.Math.Vector2(0, 0);
+      this.magnitude = 0;
+      this.enabled = true;
+
+      this.setScrollFactor(0);
+      this.setSize((this.radius + this.hitPadding) * 2, (this.radius + this.hitPadding) * 2);
+      this.setDepth(25);
+      this.setAlpha(1);
+      this.setVisible(true);
+
+      const outer = scene.add.circle(0, 0, this.radius, 0x000000, 0.32);
+      outer.setStrokeStyle(4, 0xffffff, 0.65);
+
+      const inner = scene.add.circle(0, 0, this.innerRadius, 0xffffff, 0.78);
+      inner.setStrokeStyle(2, 0xffffff, 0.92);
+
+      this.add([outer, inner]);
+      this.outerRing = outer;
+      this.knob = inner;
+
+      this.setInteractive(
+        new Phaser.Geom.Circle(0, 0, this.radius + this.hitPadding),
+        Phaser.Geom.Circle.Contains
+      );
+
+      this.on('pointerdown', this.handlePointerDown, this);
+      this.on('pointermove', this.handlePointerMove, this);
+      this.on('pointerup', this.handlePointerUp, this);
+      this.on('pointerupoutside', this.handlePointerUp, this);
+      this.on('pointercancel', this.handlePointerUp, this);
+      this.on('pointerout', this.handlePointerUp, this);
+      this.on('lostpointercapture', this.handlePointerUp, this);
+
+      this.scene.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+        this.reset();
+        this.destroy(true);
+      });
+    }
+
+    getPointerId(pointer) {
+      if (!pointer) {
+        return null;
+      }
+      if (typeof pointer.id !== 'undefined') {
+        return pointer.id;
+      }
+      if (typeof pointer.pointerId !== 'undefined') {
+        return pointer.pointerId;
+      }
+      if (typeof pointer.identifier !== 'undefined') {
+        return pointer.identifier;
+      }
+      return 'mouse';
+    }
+
+    setControlEnabled(enabled) {
+      this.enabled = !!enabled;
+      if (this.input) {
+        this.input.enabled = this.enabled;
+      }
+      if (!this.enabled) {
+        this.reset();
+      }
+    }
+
+    isEnabled() {
+      return this.enabled;
+    }
+
+    isActive() {
+      return this.pointerId !== null && this.magnitude > this.deadzone;
+    }
+
+    handlePointerDown(pointer) {
+      if (!this.enabled) {
+        return;
+      }
+      const pointerId = this.getPointerId(pointer);
+      if (this.pointerId !== null && this.pointerId !== pointerId) {
+        return;
+      }
+      this.pointerId = pointerId;
+      if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
+        this.scene.preventPointerDefault(pointer);
+      }
+      this.updateFromPointer(pointer);
+      this.emit('joystickstart', this.vector);
+    }
+
+    handlePointerMove(pointer) {
+      if (!this.enabled) {
+        return;
+      }
+      const pointerId = this.getPointerId(pointer);
+      if (this.pointerId !== pointerId) {
+        return;
+      }
+      if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
+        this.scene.preventPointerDefault(pointer);
+      }
+      this.updateFromPointer(pointer);
+      this.emit('joystickmove', this.vector);
+    }
+
+    handlePointerUp(pointer) {
+      const pointerId = this.getPointerId(pointer);
+      if (this.pointerId !== null && pointerId !== null && this.pointerId !== pointerId) {
+        return;
+      }
+      if (this.scene && typeof this.scene.preventPointerDefault === 'function') {
+        this.scene.preventPointerDefault(pointer);
+      }
+      this.reset();
+      this.emit('joystickend');
+    }
+
+    updateFromPointer(pointer) {
+      const worldX = typeof pointer.worldX === 'number' ? pointer.worldX : pointer.x;
+      const worldY = typeof pointer.worldY === 'number' ? pointer.worldY : pointer.y;
+      const dx = worldX - this.x;
+      const dy = worldY - this.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      const clampedDistance = Math.min(distance, this.radius);
+      const angle = Math.atan2(dy, dx);
+      const knobX = Math.cos(angle) * clampedDistance;
+      const knobY = Math.sin(angle) * clampedDistance;
+
+      this.knob.setPosition(knobX, knobY);
+
+      const normalizedMagnitude = clampedDistance / this.radius;
+      if (normalizedMagnitude < this.deadzone) {
+        this.vector.set(0, 0);
+        this.magnitude = 0;
+        return;
+      }
+
+      this.magnitude = normalizedMagnitude;
+      this.vector.set(
+        Phaser.Math.Clamp(knobX / this.radius, -1, 1),
+        Phaser.Math.Clamp(knobY / this.radius, -1, 1)
+      );
+    }
+
+    reset() {
+      this.pointerId = null;
+      this.vector.set(0, 0);
+      this.magnitude = 0;
+      if (this.knob) {
+        this.knob.setPosition(0, 0);
+      }
+    }
+
+    getVector() {
+      return { x: this.vector.x, y: this.vector.y, magnitude: this.magnitude };
+    }
+  }
+
   class Stick extends Phaser.GameObjects.Container {
     constructor(scene, x, y, config = {}) {
       super(scene, x, y);
@@ -92,15 +271,23 @@
 
       this.setSize(28, 64);
 
+      this.baseBodySize = { width: 28, height: 64 };
+      this.crouchBodySize = { width: 28, height: 44 };
+      this.crouchOffset = (this.baseBodySize.height - this.crouchBodySize.height) / 2;
+      this._crouchOffsetApplied = 0;
+      this.isCrouching = false;
       this.hp = 100;
       this.facing = config.facing === -1 ? -1 : 1;
       this.isAttacking = false;
 
       scene.physics.add.existing(this);
       const body = /** @type {Phaser.Physics.Arcade.Body} */ (this.body);
-      body.setAllowGravity(false);
+      body.setAllowGravity(true);
       body.setCollideWorldBounds(true);
-      body.setSize(28, 64, true);
+      body.setSize(this.baseBodySize.width, this.baseBodySize.height, true);
+      body.setMaxVelocity(MAX_VEL, JUMP_SPEED * 1.3);
+      body.setDrag(0, 0);
+      body.setBounce(0, 0);
 
       this.setScale(this.facing, 1);
     }
@@ -114,12 +301,30 @@
       return this;
     }
 
-    setX(x) {
-      return super.setX(x);
-    }
+    setCrouching(crouching) {
+      const body = /** @type {Phaser.Physics.Arcade.Body} */ (this.body);
+      if (!body) {
+        return this;
+      }
+      const shouldCrouch = !!crouching;
+      if (shouldCrouch === this.isCrouching) {
+        return this;
+      }
 
-    setY(y) {
-      return super.setY(y);
+      if (shouldCrouch) {
+        body.setSize(this.baseBodySize.width, this.crouchBodySize.height, true);
+        super.setY(this.y + this.crouchOffset);
+        this._crouchOffsetApplied = this.crouchOffset;
+      } else {
+        body.setSize(this.baseBodySize.width, this.baseBodySize.height, true);
+        if (this._crouchOffsetApplied) {
+          super.setY(this.y - this._crouchOffsetApplied);
+        }
+        this._crouchOffsetApplied = 0;
+      }
+
+      this.isCrouching = shouldCrouch;
+      return this;
     }
 
     update() {
@@ -163,15 +368,22 @@
         p2: this.createPointerState(),
       };
       this.keyboardHoldStates = {
-        p1: { left: false, right: false },
-        p2: { left: false, right: false },
+        p1: { left: false, right: false, crouch: false },
+        p2: { left: false, right: false, crouch: false },
+      };
+      this.keyboardJumpQueue = {
+        p1: { up: false, forward: false, back: false },
+        p2: { up: false, forward: false, back: false },
       };
       this.touchButtons = { p1: {}, p2: {} };
+      this.virtualJoysticks = { p1: null, p2: null };
       this.touchButtonsList = [];
+      this.joystickList = [];
       this.touchButtonLayout = {
         size: 80,
         gap: 18,
         margin: 28,
+        joystickRadius: JOYSTICK_RADIUS,
       };
       const nav = typeof navigator !== 'undefined' ? navigator : null;
       const hasTouchSupport =
@@ -186,6 +398,14 @@
       this._layoutReadyLogPrinted = false;
       this._resizeDebounceEvent = null;
       this._pendingResizeSize = null;
+      this.joystickSnapshots = {
+        p1: this.createJoystickSnapshot(),
+        p2: this.createJoystickSnapshot(),
+      };
+      this.joystickPrevDirections = {
+        p1: { up: false, forward: false, back: false },
+        p2: { up: false, forward: false, back: false },
+      };
     }
 
     preload() {}
@@ -437,21 +657,178 @@
 
     update(time, delta) {
       this.dt = Math.min(delta, 50) / 1000;
-      const dt = this.dt;
+      this.reconcileInputState();
 
       if (this._fighters && this._fighters.length) {
         const [p1, p2] = this._fighters;
         if (p1) {
-          this.updateFighterMovement(p1, this.p1Input, p2, dt);
+          this.updateFighterMovement(p1, this.p1Input, p2, this.dt);
         }
         if (p2) {
-          this.updateFighterMovement(p2, this.p2Input, p1, dt);
+          this.updateFighterMovement(p2, this.p2Input, p1, this.dt);
         }
       }
 
-      this._fighters.forEach((fighter) => fighter.update(dt));
+      this._fighters.forEach((fighter) => fighter.update(this.dt));
       this.resetMomentaryInputFlags();
       this.updateDebugOverlay();
+    }
+
+    reconcileInputState() {
+      this.updateJoystickSnapshots();
+
+      ['p1', 'p2'].forEach((player) => {
+        const state = this.getPlayerInput(player);
+        if (!state) {
+          return;
+        }
+
+        const joystick = this.joystickSnapshots[player];
+        const keyboardMoveX = this.determineKeyboardMoveX(player);
+        const moveX = keyboardMoveX !== 0 ? keyboardMoveX : joystick.moveX;
+        state.moveX = Phaser.Math.Clamp(moveX, -1, 1);
+
+        const holds = this.keyboardHoldStates[player];
+        const crouch = (holds?.crouch || false) || joystick.crouch;
+        state.crouch = !!crouch;
+
+        const jumpQueue = this.keyboardJumpQueue[player];
+        if (jumpQueue) {
+          if (jumpQueue.forward) {
+            state.jumpForward = true;
+          }
+          if (jumpQueue.back) {
+            state.jumpBack = true;
+          }
+          if (jumpQueue.up) {
+            state.jumpUp = true;
+          }
+        }
+
+        if (joystick.jumpForward) {
+          state.jumpForward = true;
+        }
+        if (joystick.jumpBack) {
+          state.jumpBack = true;
+        }
+        if (joystick.jumpUp) {
+          state.jumpUp = true;
+        }
+      });
+    }
+
+    createPlayerInputState() {
+      return {
+        moveX: 0,
+        crouch: false,
+        jumpUp: false,
+        jumpForward: false,
+        jumpBack: false,
+        punch: false,
+        kick: false,
+        punchPressed: false,
+        kickPressed: false,
+      };
+    }
+
+    createPointerState() {
+      return {
+        punch: new Set(),
+        kick: new Set(),
+      };
+    }
+
+    createJoystickSnapshot() {
+      return {
+        moveX: 0,
+        crouch: false,
+        jumpUp: false,
+        jumpForward: false,
+        jumpBack: false,
+      };
+    }
+
+    getPlayerInput(player) {
+      return player === 'p2' ? this.p2Input : this.p1Input;
+    }
+
+    updateJoystickSnapshots() {
+      ['p1', 'p2'].forEach((player) => {
+        const joystick = this.virtualJoysticks[player];
+        const snapshot = this.joystickSnapshots[player];
+        snapshot.moveX = 0;
+        snapshot.crouch = false;
+        snapshot.jumpUp = false;
+        snapshot.jumpForward = false;
+        snapshot.jumpBack = false;
+
+        const prev = this.joystickPrevDirections[player];
+        if (!joystick || !joystick.isEnabled()) {
+          prev.up = false;
+          prev.forward = false;
+          prev.back = false;
+          return;
+        }
+
+        const vector = joystick.getVector();
+        if (!joystick.isActive()) {
+          prev.up = false;
+          prev.forward = false;
+          prev.back = false;
+          return;
+        }
+
+        snapshot.moveX = Phaser.Math.Clamp(vector.x, -1, 1);
+
+        const crouchActive = vector.y >= JOYSTICK_CROUCH_THRESHOLD;
+        snapshot.crouch = crouchActive;
+
+        const upActive = vector.y <= -JOYSTICK_JUMP_THRESHOLD;
+        const forwardActive = upActive && vector.x >= JOYSTICK_JUMP_HORIZONTAL_THRESHOLD;
+        const backActive = upActive && vector.x <= -JOYSTICK_JUMP_HORIZONTAL_THRESHOLD;
+
+        if (forwardActive && !prev.forward) {
+          snapshot.jumpForward = true;
+        } else if (backActive && !prev.back) {
+          snapshot.jumpBack = true;
+        } else if (upActive && !prev.up && !forwardActive && !backActive) {
+          snapshot.jumpUp = true;
+        }
+
+        prev.up = upActive;
+        prev.forward = forwardActive;
+        prev.back = backActive;
+      });
+    }
+
+    determineKeyboardMoveX(player) {
+      const states = this.keyboardHoldStates[player];
+      if (!states) {
+        return 0;
+      }
+      const left = !!states.left;
+      const right = !!states.right;
+      if (left === right) {
+        return 0;
+      }
+      return right ? 1 : -1;
+    }
+
+    handleKeyboardJump(player) {
+      const queue = this.keyboardJumpQueue[player];
+      const holds = this.keyboardHoldStates[player];
+      if (!queue || !holds) {
+        return;
+      }
+      const horizontal = holds.right === holds.left ? 0 : holds.right ? 1 : -1;
+      if (horizontal > 0) {
+        queue.forward = true;
+      } else if (horizontal < 0) {
+        queue.back = true;
+      } else {
+        queue.up = true;
+      }
+      this.detectKeyboard();
     }
 
     updateFighterMovement(fighter, input, opponent, dt) {
@@ -469,33 +846,71 @@
         fighter.setFacing(facingDirection);
       }
 
-      let targetVelocity = 0;
+      const onGround = body.blocked.down || body.touching.down || body.onFloor?.();
       const canControl = !fighter.isAttacking;
+
+      const wantsCrouch = !!(input && input.crouch && onGround && canControl);
+      fighter.setCrouching(wantsCrouch);
+
+      let moveInput = 0;
       if (canControl && input) {
-        const leftActive = !!input.left;
-        const rightActive = !!input.right;
-        if (leftActive && !rightActive) {
-          targetVelocity = -SPEED;
-        } else if (rightActive && !leftActive) {
-          targetVelocity = SPEED;
-        }
+        moveInput = Phaser.Math.Clamp(input.moveX || 0, -1, 1);
+      }
+      if (!canControl) {
+        moveInput = 0;
       }
 
-      const acceleration = targetVelocity === 0 ? FRICTION : ACCEL;
-      let vx = body.velocity.x;
+      let targetVelocity = moveInput * SPEED;
+      if (fighter.isCrouching) {
+        targetVelocity *= CROUCH_SPEED_SCALE;
+      }
 
+      const acceleration = onGround
+        ? targetVelocity === 0
+          ? FRICTION
+          : ACCEL
+        : AIR_ACCEL;
+
+      let vx = body.velocity.x;
       if (targetVelocity > vx) {
         vx = Math.min(vx + acceleration * dt, targetVelocity);
       } else if (targetVelocity < vx) {
         vx = Math.max(vx - acceleration * dt, targetVelocity);
+      } else if (targetVelocity === 0 && onGround) {
+        const frictionStep = FRICTION * dt;
+        if (vx > frictionStep) {
+          vx -= frictionStep;
+        } else if (vx < -frictionStep) {
+          vx += frictionStep;
+        } else {
+          vx = 0;
+        }
       }
 
-      vx = Phaser.Math.Clamp(vx, -MAX_VEL, MAX_VEL);
-      if (targetVelocity === 0 && Math.abs(vx) < 1) {
-        vx = 0;
+      if (!onGround) {
+        vx = Phaser.Math.Clamp(Phaser.Math.Linear(vx, targetVelocity, dt * AIR_DRAG), -MAX_VEL, MAX_VEL);
       }
 
-      body.setVelocityX(vx);
+      body.setVelocityX(Phaser.Math.Clamp(vx, -MAX_VEL, MAX_VEL));
+
+      if (input && canControl) {
+        const wantsJumpForward = !!input.jumpForward;
+        const wantsJumpBack = !!input.jumpBack;
+        const wantsJumpUp = !!input.jumpUp;
+        const jumpRequested = wantsJumpForward || wantsJumpBack || wantsJumpUp;
+        if (jumpRequested && onGround) {
+          if (fighter.isCrouching) {
+            fighter.setCrouching(false);
+          }
+          const horizontalDir = wantsJumpForward ? 1 : wantsJumpBack ? -1 : 0;
+          const horizontalVelocity =
+            horizontalDir !== 0 ? horizontalDir * JUMP_HORIZONTAL_SPEED : body.velocity.x;
+          body.setVelocityY(-JUMP_SPEED);
+          if (horizontalDir !== 0) {
+            body.setVelocityX(Phaser.Math.Clamp(horizontalVelocity, -MAX_VEL, MAX_VEL));
+          }
+        }
+      }
     }
 
     spawnFighters() {
@@ -544,99 +959,6 @@
 
       this._fighters = [p1, p2];
     }
-
-    createPlayerInputState() {
-      return {
-        left: false,
-        right: false,
-        punch: false,
-        kick: false,
-        punchPressed: false,
-        kickPressed: false,
-      };
-    }
-
-    createPointerState() {
-      return {
-        left: new Set(),
-        right: new Set(),
-        punch: new Set(),
-        kick: new Set(),
-      };
-    }
-
-    getPlayerInput(player) {
-      return player === 'p2' ? this.p2Input : this.p1Input;
-    }
-
-    updateSafeAreaInsets() {
-      if (typeof window === 'undefined' || !window.getComputedStyle) {
-        this.safeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
-        return;
-      }
-      const root = document.documentElement;
-      const styles = window.getComputedStyle(root);
-      const parseInset = (prop) => {
-        const value = parseFloat(styles.getPropertyValue(prop));
-        return Number.isFinite(value) ? value : 0;
-      };
-      this.safeAreaInsets = {
-        top: parseInset('--safe-area-inset-top'),
-        right: parseInset('--safe-area-inset-right'),
-        bottom: parseInset('--safe-area-inset-bottom'),
-        left: parseInset('--safe-area-inset-left'),
-      };
-    }
-
-    createDebugOverlay() {
-      const text = this.add
-        .text(0, 0, '', {
-          fontFamily: 'Menlo, Monaco, Consolas, monospace',
-          fontSize: '16px',
-          color: '#00e7ff',
-          align: 'center',
-        })
-        .setOrigin(0.5, 0);
-      text.setScrollFactor(0);
-      text.setDepth(20);
-      text.setAlpha(1);
-      text.setVisible(false);
-      this.debugText = text;
-      this.positionDebugOverlay();
-      this.updateDebugOverlay();
-    }
-
-    positionDebugOverlay() {
-      if (!this.debugText) {
-        return;
-      }
-      const { width } = this.scale.gameSize;
-      const topOffset = (this.safeAreaInsets?.top || 0) + 12;
-      this.debugText.setPosition(width / 2, topOffset);
-    }
-
-    updateDebugOverlay() {
-      if (!this.debugText) {
-        return;
-      }
-      const format = (value) => (value ? 'T' : 'F');
-      const p1 = this.p1Input;
-      const p2 = this.p2Input;
-      const lines = [
-        `P1 L:${format(p1.left)} R:${format(p1.right)} P:${format(p1.punch)} K:${format(p1.kick)}`,
-        `P2 L:${format(p2.left)} R:${format(p2.right)} P:${format(p2.punch)} K:${format(p2.kick)}`,
-      ];
-      this.debugText.setText(lines.join('\n'));
-      this.debugText.setVisible(this.debugOverlayVisible);
-    }
-
-    toggleDebugOverlay(forceState) {
-      if (typeof forceState === 'boolean') {
-        this.debugOverlayVisible = forceState;
-      } else {
-        this.debugOverlayVisible = !this.debugOverlayVisible;
-      }
-      this.updateDebugOverlay();
     }
 
     registerTouchPrevention() {
@@ -663,18 +985,38 @@
         this.touchButtons[player][key] = button;
         this.touchButtonsList.push(button);
         button.activePointers = this.pointerStates[player][key];
-        const mode = key === 'left' || key === 'right' ? 'directional' : 'action';
-        this.configureButtonInteraction(button, player, key, mode);
+        this.configureButtonInteraction(button, player, key);
         return button;
       };
 
-      createButton('p1', 'left', '◀', { fontSize: '42px' });
-      createButton('p1', 'right', '▶', { fontSize: '42px' });
+      const joystickP1 = new VirtualJoystick(this, 0, 0, {
+        radius: this.touchButtonLayout.joystickRadius,
+        deadzone: JOYSTICK_DEADZONE,
+      });
+      const joystickP2 = new VirtualJoystick(this, 0, 0, {
+        radius: this.touchButtonLayout.joystickRadius,
+        deadzone: JOYSTICK_DEADZONE,
+      });
+
+      const onJoystickInput = () => {
+        if (this._keyboardDetected) {
+          this._keyboardDetected = false;
+          this.updateTouchControlsVisibility();
+        }
+      };
+
+      joystickP1.on('joystickstart', onJoystickInput);
+      joystickP2.on('joystickstart', onJoystickInput);
+      joystickP1.on('joystickmove', () => {});
+      joystickP2.on('joystickmove', () => {});
+
+      this.virtualJoysticks.p1 = joystickP1;
+      this.virtualJoysticks.p2 = joystickP2;
+      this.joystickList.push(joystickP1, joystickP2);
+
       createButton('p1', 'punch', 'Punch', { fontSize: '26px' });
       createButton('p1', 'kick', 'Kick', { fontSize: '26px' });
 
-      createButton('p2', 'left', '◀', { fontSize: '42px' });
-      createButton('p2', 'right', '▶', { fontSize: '42px' });
       createButton('p2', 'punch', 'Punch', { fontSize: '26px' });
       createButton('p2', 'kick', 'Kick', { fontSize: '26px' });
 
@@ -727,7 +1069,7 @@
       return container;
     }
 
-    configureButtonInteraction(button, player, key, mode) {
+    configureButtonInteraction(button, player, key) {
       if (!button) {
         return;
       }
@@ -738,23 +1080,15 @@
         if (pointer && typeof pointer.id !== 'undefined') {
           pointerSet.add(pointer.id);
         }
-        if (mode === 'directional') {
-          this.syncDirectionalState(player, key);
-        } else {
-          this.handleActionPress(player, key);
-          this.updateActionHoldState(player, key);
-        }
+        this.handleActionPress(player, key);
+        this.updateActionHoldState(player, key);
       };
 
       const handlePointerEnd = (pointer) => {
         if (pointer && typeof pointer.id !== 'undefined') {
           pointerSet.delete(pointer.id);
         }
-        if (mode === 'directional') {
-          this.syncDirectionalState(player, key);
-        } else {
-          this.updateActionHoldState(player, key);
-        }
+        this.updateActionHoldState(player, key);
         this.preventPointerDefault(pointer);
       };
 
@@ -773,20 +1107,6 @@
           }
         );
       });
-    }
-
-    syncDirectionalState(player, key) {
-      const pointerActive = this.pointerStates[player][key]?.size > 0;
-      const keyboardActive = this.keyboardHoldStates[player]?.[key] || false;
-      const isActive = pointerActive || keyboardActive;
-      const state = this.getPlayerInput(player);
-      if (state) {
-        state[key] = isActive;
-      }
-      const button = this.touchButtons[player]?.[key];
-      if (button) {
-        this.setButtonActive(button, pointerActive);
-      }
     }
 
     handleActionPress(player, key) {
@@ -826,11 +1146,20 @@
         }
         state.punchPressed = false;
         state.kickPressed = false;
+        state.jumpUp = false;
+        state.jumpForward = false;
+        state.jumpBack = false;
         if (!(this.pointerStates[player].punch?.size > 0)) {
           state.punch = false;
         }
         if (!(this.pointerStates[player].kick?.size > 0)) {
           state.kick = false;
+        }
+        const queue = this.keyboardJumpQueue[player];
+        if (queue) {
+          queue.up = false;
+          queue.forward = false;
+          queue.back = false;
         }
       });
     }
@@ -843,29 +1172,43 @@
     }
 
     positionTouchButtons() {
-      const p1 = this.touchButtons.p1;
-      const p2 = this.touchButtons.p2;
-      if (!p1.left || !p1.right || !p1.punch || !p1.kick || !p2.left || !p2.right || !p2.punch || !p2.kick) {
-        return;
+      const { width, height } = this.scale.gameSize;
+      const { size, gap, margin, joystickRadius } = this.touchButtonLayout;
+      const safe = this.safeAreaInsets || { top: 0, right: 0, bottom: 0, left: 0 };
+      const buttonSpacing = size + gap;
+      const joystickY = height - safe.bottom - margin - joystickRadius;
+      const buttonsBaseY = height - safe.bottom - margin - size / 2;
+      const buttonOffset = buttonSpacing / 2;
+
+      const joystickP1 = this.virtualJoysticks.p1;
+      if (joystickP1) {
+        joystickP1.setPosition(safe.left + margin + joystickRadius, joystickY);
       }
 
-      const { width, height } = this.scale.gameSize;
-      const { size, gap, margin } = this.touchButtonLayout;
-      const safe = this.safeAreaInsets || { top: 0, right: 0, bottom: 0, left: 0 };
-      const step = size + gap;
-      const baseY = height - safe.bottom - margin - size / 2;
+      const joystickP2 = this.virtualJoysticks.p2;
+      if (joystickP2) {
+        joystickP2.setPosition(width - safe.right - margin - joystickRadius, joystickY);
+      }
 
-      const leftBaseX = safe.left + margin + size / 2;
-      p1.left.setPosition(leftBaseX, baseY);
-      p1.right.setPosition(leftBaseX + step, baseY);
-      p1.punch.setPosition(leftBaseX, baseY - step);
-      p1.kick.setPosition(leftBaseX + step, baseY - step);
+      const p1Punch = this.touchButtons.p1.punch;
+      const p1Kick = this.touchButtons.p1.kick;
+      if (p1Punch && p1Kick) {
+        const baseX =
+          (joystickP1 ? joystickP1.x + joystickRadius + margin + size / 2 : safe.left + margin + size / 2);
+        p1Punch.setPosition(baseX, buttonsBaseY - buttonOffset);
+        p1Kick.setPosition(baseX, buttonsBaseY + buttonOffset);
+      }
 
-      const rightBaseX = width - safe.right - margin - size / 2;
-      p2.right.setPosition(rightBaseX, baseY);
-      p2.left.setPosition(rightBaseX - step, baseY);
-      p2.kick.setPosition(rightBaseX, baseY - step);
-      p2.punch.setPosition(rightBaseX - step, baseY - step);
+      const p2Punch = this.touchButtons.p2.punch;
+      const p2Kick = this.touchButtons.p2.kick;
+      if (p2Punch && p2Kick) {
+        const baseX =
+          (joystickP2
+            ? joystickP2.x - joystickRadius - margin - size / 2
+            : width - safe.right - margin - size / 2);
+        p2Punch.setPosition(baseX, buttonsBaseY - buttonOffset);
+        p2Kick.setPosition(baseX, buttonsBaseY + buttonOffset);
+      }
     }
 
     setButtonActive(button, isActive) {
@@ -883,27 +1226,43 @@
 
       const keyboard = this.input.keyboard;
 
-      const setDirectionalKeyState = (player, key, isActive) => {
+      const setMoveKeyState = (player, key, isActive) => {
         const keyboardStates = this.keyboardHoldStates[player];
         if (!keyboardStates) {
           return;
         }
         keyboardStates[key] = isActive;
-        this.syncDirectionalState(player, key);
         if (isActive) {
           this.detectKeyboard();
         }
       };
 
-      const onP1LeftDown = () => setDirectionalKeyState('p1', 'left', true);
-      const onP1LeftUp = () => setDirectionalKeyState('p1', 'left', false);
-      const onP1RightDown = () => setDirectionalKeyState('p1', 'right', true);
-      const onP1RightUp = () => setDirectionalKeyState('p1', 'right', false);
+      const setCrouchState = (player, isActive) => {
+        const keyboardStates = this.keyboardHoldStates[player];
+        if (!keyboardStates) {
+          return;
+        }
+        keyboardStates.crouch = isActive;
+        if (isActive) {
+          this.detectKeyboard();
+        }
+      };
 
-      const onP2LeftDown = () => setDirectionalKeyState('p2', 'left', true);
-      const onP2LeftUp = () => setDirectionalKeyState('p2', 'left', false);
-      const onP2RightDown = () => setDirectionalKeyState('p2', 'right', true);
-      const onP2RightUp = () => setDirectionalKeyState('p2', 'right', false);
+      const onP1LeftDown = () => setMoveKeyState('p1', 'left', true);
+      const onP1LeftUp = () => setMoveKeyState('p1', 'left', false);
+      const onP1RightDown = () => setMoveKeyState('p1', 'right', true);
+      const onP1RightUp = () => setMoveKeyState('p1', 'right', false);
+      const onP1CrouchDown = () => setCrouchState('p1', true);
+      const onP1CrouchUp = () => setCrouchState('p1', false);
+      const onP1JumpDown = () => this.handleKeyboardJump('p1');
+
+      const onP2LeftDown = () => setMoveKeyState('p2', 'left', true);
+      const onP2LeftUp = () => setMoveKeyState('p2', 'left', false);
+      const onP2RightDown = () => setMoveKeyState('p2', 'right', true);
+      const onP2RightUp = () => setMoveKeyState('p2', 'right', false);
+      const onP2CrouchDown = () => setCrouchState('p2', true);
+      const onP2CrouchUp = () => setCrouchState('p2', false);
+      const onP2JumpDown = () => this.handleKeyboardJump('p2');
 
       const onP1PunchDown = () => this.handleKeyboardAction('p1', 'punch');
       const onP1KickDown = () => this.handleKeyboardAction('p1', 'kick');
@@ -915,10 +1274,16 @@
         ['keyup-A', onP1LeftUp],
         ['keydown-D', onP1RightDown],
         ['keyup-D', onP1RightUp],
+        ['keydown-S', onP1CrouchDown],
+        ['keyup-S', onP1CrouchUp],
+        ['keydown-W', onP1JumpDown],
         ['keydown-LEFT', onP2LeftDown],
         ['keyup-LEFT', onP2LeftUp],
         ['keydown-RIGHT', onP2RightDown],
         ['keyup-RIGHT', onP2RightUp],
+        ['keydown-DOWN', onP2CrouchDown],
+        ['keyup-DOWN', onP2CrouchUp],
+        ['keydown-UP', onP2JumpDown],
         ['keydown-J', onP1PunchDown],
         ['keydown-K', onP1KickDown],
       ];
@@ -982,6 +1347,91 @@
           button.input.enabled = visible;
         }
       });
+      this.joystickList.forEach((joystick) => {
+        if (!joystick) {
+          return;
+        }
+        joystick.setVisible(visible);
+        joystick.setControlEnabled(visible);
+      });
+    }
+
+    updateSafeAreaInsets() {
+      if (typeof window === 'undefined' || !window.getComputedStyle) {
+        this.safeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+        return;
+      }
+      const root = document.documentElement;
+      const styles = window.getComputedStyle(root);
+      const parseInset = (prop) => {
+        const value = parseFloat(styles.getPropertyValue(prop));
+        return Number.isFinite(value) ? value : 0;
+      };
+      this.safeAreaInsets = {
+        top: parseInset('--safe-area-inset-top'),
+        right: parseInset('--safe-area-inset-right'),
+        bottom: parseInset('--safe-area-inset-bottom'),
+        left: parseInset('--safe-area-inset-left'),
+      };
+    }
+
+    createDebugOverlay() {
+      const text = this.add
+        .text(0, 0, '', {
+          fontFamily: 'Menlo, Monaco, Consolas, monospace',
+          fontSize: '16px',
+          color: '#00e7ff',
+          align: 'center',
+        })
+        .setOrigin(0.5, 0);
+      text.setScrollFactor(0);
+      text.setDepth(40);
+      text.setAlpha(1);
+      text.setVisible(false);
+      this.debugText = text;
+      this.positionDebugOverlay();
+      this.updateDebugOverlay();
+    }
+
+    positionDebugOverlay() {
+      if (!this.debugText) {
+        return;
+      }
+      const { width } = this.scale.gameSize;
+      const topOffset = (this.safeAreaInsets?.top || 0) + 12;
+      this.debugText.setPosition(width / 2, topOffset);
+    }
+
+    updateDebugOverlay() {
+      if (!this.debugText) {
+        return;
+      }
+      const format = (value) => (value ? 'T' : 'F');
+      const formatMove = (value) => {
+        const safe = Number.isFinite(value) ? value : 0;
+        return safe.toFixed(2);
+      };
+      const p1 = this.p1Input;
+      const p2 = this.p2Input;
+      const lines = [
+        `P1 MX:${formatMove(p1.moveX)} C:${format(p1.crouch)} JU:${format(p1.jumpUp)} JF:${format(
+          p1.jumpForward
+        )} JB:${format(p1.jumpBack)} P:${format(p1.punch)} K:${format(p1.kick)}`,
+        `P2 MX:${formatMove(p2.moveX)} C:${format(p2.crouch)} JU:${format(p2.jumpUp)} JF:${format(
+          p2.jumpForward
+        )} JB:${format(p2.jumpBack)} P:${format(p2.punch)} K:${format(p2.kick)}`,
+      ];
+      this.debugText.setText(lines.join('\n'));
+      this.debugText.setVisible(this.debugOverlayVisible);
+    }
+
+    toggleDebugOverlay(forceState) {
+      if (typeof forceState === 'boolean') {
+        this.debugOverlayVisible = forceState;
+      } else {
+        this.debugOverlayVisible = !this.debugOverlayVisible;
+      }
+      this.updateDebugOverlay();
     }
   }
 
@@ -1004,7 +1454,7 @@
     physics: {
       default: 'arcade',
       arcade: {
-        gravity: { y: 0 },
+        gravity: { y: GRAVITY_Y },
         debug: false,
       },
     },
