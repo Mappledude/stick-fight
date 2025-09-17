@@ -132,8 +132,7 @@ function ensureAuthReady() {
   return ensureSignedInUser().then(() => undefined);
 }
 
-// Exports (adjust to your module system)
-export { ensureAuth, ensureSignedInUser, ensureAuthReady };
+  const namespace = global.StickFightNet || {};
 
 
   const getTimestampValue = () => {
@@ -748,13 +747,16 @@ export { ensureAuth, ensureSignedInUser, ensureAuthReady };
 
   initWhenReady();
 
-  global.StickFightNet = {
+  global.StickFightNet = Object.assign(namespace, {
     state: netState,
     ensureFirestore,
+    ensureAuth,
+    ensureSignedInUser,
+    ensureAuthReady,
     createRoom,
     joinRoom,
     buildShareUrl,
     hideOverlay,
     showOverlay,
-  };
+  });
 })(typeof window !== 'undefined' ? window : this);
