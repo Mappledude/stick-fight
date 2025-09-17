@@ -5,6 +5,7 @@
     initialized: false,
     firestore: null,
     fieldValue: null,
+    auth: null,
     roomId: null,
     peerId: null,
     isHost: false,
@@ -30,10 +31,7 @@
     return null;
   };
 
-  const ensureFirestore = () => {
-    if (netState.firestore) {
-      return netState.firestore;
-    }
+  const ensureFirebaseApp = () => {
     const firebase = firebaseNamespace();
     if (!firebase) {
       throw new Error('Firebase SDK failed to load.');
@@ -45,6 +43,14 @@
     if (!firebase.apps || firebase.apps.length === 0) {
       firebase.initializeApp(config);
     }
+    return firebase;
+  };
+
+  const ensureFirestore = () => {
+    if (netState.firestore) {
+      return netState.firestore;
+    }
+    const firebase = ensureFirebaseApp();
     if (typeof firebase.firestore !== 'function') {
       throw new Error('Firestore SDK is not available.');
     }
@@ -52,6 +58,35 @@
     netState.firestore = firestoreInstance;
     netState.fieldValue = firebase.firestore.FieldValue || null;
     return firestoreInstance;
+  };
+
+  const ensureAuth = () => {
+    if (netState.auth) {
+      return netState.auth;
+    }
+    const firebase = ensureFirebaseApp();
+    if (typeof firebase.auth !== 'function') {
+      throw new Error('Firebase Auth SDK is not available.');
+    }
+    const authInstance = firebase.auth();
+    netState.auth = authInstance;
+    return authInstance;
+  };
+
+  const ensureSignedInUser = async () => {
+    const auth = ensureAuth();
+    if (auth.currentUser) {
+      return { auth, user: auth.currentUser };
+    }
+    if (typeof auth.signInAnonymously === 'function') {
+      const result = await auth.signInAnonymously();
+      const user = (result && result.user) || auth.currentUser;
+      if (user) {
+        return { auth, user };
+      }
+      throw new Error('Failed to sign in anonymously.');
+    }
+    throw new Error('No authenticated user is available.');
   };
 
   const getTimestampValue = () => {
@@ -145,13 +180,18 @@
 
   const createRoom = async (options) => {
     const firestore = ensureFirestore();
+    const { auth, user } = await ensureSignedInUser();
+    const currentUser = user || (auth && auth.currentUser);
+    if (!currentUser || !currentUser.uid) {
+      throw new Error('Unable to determine the authenticated user.');
+    }
     const hostName = typeof options === 'string' ? options : options && options.name;
     const resolvedHostName = hostName && hostName.trim() ? hostName.trim() : 'Host';
     const roomId = generateRoomId();
     const hostPeerId = generatePeerId();
     const roomsCollection = firestore.collection('rooms');
     const roomRef = roomsCollection.doc(roomId);
-    const playersRef = roomRef.collection('players').doc(hostPeerId);
+    const playersRef = roomRef.collection('players').doc(currentUser.uid);
 
     await runTransaction(async (transaction) => {
       const existing = await transaction.get(roomRef);
@@ -164,8 +204,11 @@
         hostPeerId,
       });
       transaction.set(playersRef, {
+        uid: currentUser.uid,
+        peerId: hostPeerId,
         name: resolvedHostName,
         joinedAt: getTimestampValue(),
+        isHost: true,
       });
     });
 
@@ -189,6 +232,11 @@
 
   const joinRoom = async (roomId, options) => {
     const firestore = ensureFirestore();
+    const { auth, user } = await ensureSignedInUser();
+    const currentUser = user || (auth && auth.currentUser);
+    if (!currentUser || !currentUser.uid) {
+      throw new Error('Unable to determine the authenticated user.');
+    }
     const playersName = typeof options === 'string' ? options : options && options.name;
     const resolvedName = playersName && playersName.trim() ? playersName.trim() : 'Player';
     const trimmedRoomId = sanitizeRoomId(roomId);
@@ -197,6 +245,7 @@
     }
     const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
     const peerId = generatePeerId();
+    const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
 
     await runTransaction(async (transaction) => {
       const roomSnapshot = await transaction.get(roomRef);
@@ -207,12 +256,17 @@
       const maxPlayers = typeof roomData.maxPlayers === 'number' ? roomData.maxPlayers : 9;
       const playersCollection = roomRef.collection('players');
       const playersSnapshot = await transaction.get(playersCollection);
-      if (playersSnapshot && playersSnapshot.size >= maxPlayers) {
+      const existingPlayerDoc = await transaction.get(playerDocRef);
+      const alreadyPresent = existingPlayerDoc && existingPlayerDoc.exists;
+      if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
         throw new Error('This room is already full.');
       }
-      transaction.set(playersCollection.doc(peerId), {
+      transaction.set(playerDocRef, {
+        uid: currentUser.uid,
+        peerId,
         name: resolvedName,
         joinedAt: getTimestampValue(),
+        isHost: false,
       });
     });
 
