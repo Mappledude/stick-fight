@@ -25,7 +25,10 @@
     connections: new Map(),
     peerInputs: {},
     remotePlayers: [],
-    remotePlayArea: null,
+// Netplay runtime fields (merged)
+this.registry = (typeof this.registry !== 'undefined') ? this.registry : null;        // from main
+this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remotePlayArea : null;  // from 4d
+
     lastInputSentAt: null,
     lastInputReceivedAt: null,
     lastStateBroadcastAt: null,
@@ -37,6 +40,7 @@
     guestSessionUnsub: null,
     guestCandidateUnsub: null,
     stateBroadcastTimer: null,
+    serverStepTimer: null,
   };
 
   function detectDiagnosticsFlag() {
@@ -75,6 +79,177 @@
     return value;
   }
 
+  const SERVER_FIXED_STEP_DT = 1 / 60;
+  const SERVER_FIXED_STEP_MS = 1000 / 60;
+
+  function getHostServerModule() {
+    const server = global.StickFightHostServer;
+    if (!server || typeof server.createRegistry !== 'function') {
+      return null;
+    }
+    return server;
+  }
+
+  function determinePlayRect() {
+    const scene = runtime.scene;
+    if (!scene || !scene.playArea) {
+      return null;
+    }
+    const play = scene.playArea;
+    const width = Number(play.w !== undefined ? play.w : play.width);
+    const height = Number(play.h !== undefined ? play.h : play.height);
+    if (!Number.isFinite(width) || !Number.isFinite(height)) {
+      return null;
+    }
+    const x = Number(play.x);
+    const y = Number(play.y);
+    return {
+      x: Number.isFinite(x) ? x : 0,
+      y: Number.isFinite(y) ? y : 0,
+      width,
+      height,
+    };
+  }
+
+  function getSlotForPeer(peerId) {
+    if (!peerId || !runtime.slotAssignments) {
+      return null;
+    }
+    const entries = Object.keys(runtime.slotAssignments);
+    for (let i = 0; i < entries.length; i += 1) {
+      const slot = entries[i];
+      if (runtime.slotAssignments[slot] === peerId) {
+        return slot;
+      }
+    }
+    return null;
+  }
+
+  function ensureHostRegistry() {
+    if (runtime.role !== 'host') {
+      return null;
+    }
+    const server = getHostServerModule();
+    if (!server) {
+      return null;
+    }
+    if (!runtime.registry || typeof runtime.registry.ensurePlayer !== 'function') {
+      const playRect = determinePlayRect();
+      runtime.registry = server.createRegistry(playRect ? { playRect } : {});
+    }
+    if (runtime.registry && typeof runtime.registry.setPlayRect === 'function') {
+      const playRect = determinePlayRect();
+      if (playRect) {
+        runtime.registry.setPlayRect(playRect);
+      }
+    }
+    return runtime.registry;
+  }
+
+  function ensureHostServerPlayer(peerId) {
+    if (!peerId || runtime.role !== 'host') {
+      return;
+    }
+    const registry = ensureHostRegistry();
+    if (!registry || typeof registry.ensurePlayer !== 'function') {
+      return;
+    }
+    registry.ensurePlayer(peerId, { slot: getSlotForPeer(peerId), name: getPlayerName(peerId) });
+  }
+
+  function updateRegistryPlayerName(peerId, name) {
+    if (!peerId || runtime.role !== 'host') {
+      return;
+    }
+    const registry = ensureHostRegistry();
+    if (!registry || typeof registry.ensurePlayer !== 'function') {
+      return;
+    }
+    registry.ensurePlayer(peerId, { slot: getSlotForPeer(peerId), name });
+  }
+
+  function normalizePeerInput(payload) {
+    if (!payload || typeof payload !== 'object') {
+      return { mx: 0, ju: 0 };
+    }
+    const move = clamp(Number(payload.mx !== undefined ? payload.mx : payload.moveX) || 0, -1, 1);
+    let jump = Number(payload.ju);
+    if (!Number.isFinite(jump)) {
+      jump = 0;
+    }
+    if (jump > 1) {
+      jump = 1;
+    } else if (jump < -1) {
+      jump = -1;
+    } else {
+      jump = Math.trunc(jump);
+    }
+    return { mx: move, ju: jump };
+  }
+
+  function readLocalInput() {
+    if (!runtime.scene || typeof runtime.scene.getPlayerInput !== 'function') {
+      return { mx: 0, ju: 0 };
+    }
+    const state = runtime.scene.getPlayerInput(runtime.localSlot);
+    if (!state) {
+      return { mx: 0, ju: 0 };
+    }
+    const move = clamp(Number(state.moveX) || 0, -1, 1);
+    let jumpDir = 0;
+    if (state.jumpForward) {
+      jumpDir = 1;
+    } else if (state.jumpBack) {
+      jumpDir = -1;
+    }
+    return { mx: move, ju: jumpDir };
+  }
+
+  function stepHostServer(dtOverride) {
+    if (runtime.role !== 'host') {
+      return;
+    }
+    const registry = ensureHostRegistry();
+    if (!registry || typeof registry.fixedStep !== 'function') {
+      return;
+    }
+    const dt = Number.isFinite(dtOverride) && dtOverride > 0 ? dtOverride : SERVER_FIXED_STEP_DT;
+
+    const localPeerId = runtime.localPeerId;
+    if (localPeerId) {
+      ensureHostServerPlayer(localPeerId);
+      registry.setInput(localPeerId, readLocalInput());
+    }
+
+    runtime.connections.forEach((connection, peerId) => {
+      if (!peerId) {
+        return;
+      }
+      ensureHostServerPlayer(peerId);
+      const entry = runtime.peerInputs[peerId];
+      if (entry && entry.payload && entry.payload.p) {
+        registry.setInput(peerId, normalizePeerInput(entry.payload.p));
+      }
+    });
+
+    registry.fixedStep(dt);
+
+    const snapshot = registry.getPlayers();
+    runtime.remotePlayers = snapshot
+      .filter((player) => player && player.id !== runtime.localPeerId)
+      .map((player) => ({
+        id: player.id,
+        name: getPlayerName(player.id),
+        x: player.x,
+        y: player.y,
+        facing: player.facing,
+      }));
+
+    if (runtime.scene && typeof runtime.scene.renderRemotePlayers === 'function') {
+      runtime.scene.renderRemotePlayers(runtime.remotePlayers);
+    }
+  }
+
   function getStickFightNet() {
     const net = global.StickFightNet;
     if (!net || typeof net.ensureFirestore !== 'function') {
@@ -100,11 +275,19 @@
     }
     const resolvedName = typeof name === 'string' && name.trim() ? name.trim() : 'Player';
     runtime.playerDirectory[safeId] = { name: resolvedName };
+    if (runtime.role === 'host') {
+      updateRegistryPlayerName(safeId, resolvedName);
+    }
   }
 
   function removePlayerFromDirectory(peerId) {
     if (typeof peerId !== 'string') {
       return;
+    }
+    if (runtime.role === 'host' && runtime.registry && typeof runtime.registry.removePlayer === 'function') {
+      if (peerId !== runtime.localPeerId) {
+        runtime.registry.removePlayer(peerId);
+      }
     }
     delete runtime.playerDirectory[peerId];
   }
@@ -269,17 +452,47 @@
           const name = data.name || 'Player';
           if (change.type === 'removed') {
             removePlayerFromDirectory(peerId);
+            if (
+              runtime.role === 'host' &&
+              runtime.scene &&
+              typeof runtime.scene.onNetPeerLeft === 'function'
+            ) {
+              try {
+                runtime.scene.onNetPeerLeft(peerId);
+              } catch (err) {
+                console.warn('[Net] Failed to notify scene of peer removal', err);
+              }
+            }
             if (runtime.role === 'host') {
               teardownConnection(peerId);
             }
             return;
           }
           updatePlayerDirectory(peerId, name);
-          if (runtime.role === 'host' && peerId !== runtime.localPeerId) {
-            ensureHostConnection(peerId);
-          }
+if (runtime.role === 'host' && peerId !== runtime.localPeerId) {
+  ensureHostConnection(peerId);
+}
+if (
+  change.type === 'added' &&
+  runtime.role === 'host' &&
+  runtime.scene &&
+  typeof runtime.scene.onNetPeerJoined === 'function'
+) {
+  try {
+    runtime.scene.onNetPeerJoined(peerId, { isLocal: peerId === runtime.localPeerId });
+  } catch (err) {
+    console.warn('[Net] Failed to notify scene of peer join', err);
+  }
+}
+
           if (!runtime.slotAssignments.p1 && data.isHost) {
             runtime.slotAssignments.p1 = peerId;
+          }
+          if (runtime.role === 'host') {
+            ensureHostServerPlayer(peerId);
+            if (peerId !== runtime.localPeerId) {
+              ensureHostConnection(peerId);
+            }
           }
         });
       },
@@ -361,6 +574,12 @@
     }
     clearConnectionRateTimers(record);
     runtime.connections.delete(peerId);
+    if (runtime.registry && typeof runtime.registry.removePlayer === 'function' && peerId !== runtime.localPeerId) {
+      runtime.registry.removePlayer(peerId);
+    }
+    if (runtime.peerInputs && Object.prototype.hasOwnProperty.call(runtime.peerInputs, peerId)) {
+      delete runtime.peerInputs[peerId];
+    }
     updateDiagnosticsOverlay();
   }
 
@@ -437,6 +656,7 @@
     if (!runtime.slotAssignments.p2) {
       runtime.slotAssignments.p2 = peerId;
     }
+    ensureHostServerPlayer(peerId);
 
     const sessionDoc = runtime.roomRef.collection('webrtc').doc(peerId);
     connection.sessionDoc = sessionDoc;
@@ -523,6 +743,17 @@
         receivedAt: now,
         stale: typeof payload.t === 'number' ? now - payload.t > INPUT_STALE_MS : false,
       };
+      if (
+        runtime.role === 'host' &&
+        runtime.scene &&
+        typeof runtime.scene.onPeerInput === 'function'
+      ) {
+        try {
+          runtime.scene.onPeerInput(peerId, runtime.peerInputs[peerId]);
+        } catch (err) {
+          console.warn('[Net] Scene peer input handling failed', err);
+        }
+      }
       connection.lastInputReceivedAt = now;
       runtime.lastInputReceivedAt = now;
       const moveX = clamp(Number(payload.p.mx) || 0, -1, 1);
@@ -535,11 +766,21 @@
         peerId,
         JSON.stringify({ mx: moveX, cr: crouch, pu: punch, ki: kick, ju: jumpDir })
       );
+      if (runtime.registry && typeof runtime.registry.setInput === 'function') {
+        runtime.registry.setInput(peerId, normalizePeerInput(payload.p));
+      }
       updateDiagnosticsOverlay();
     };
   }
 
   function startHostRuntime() {
+    ensureHostRegistry();
+    ensureHostServerPlayer(runtime.localPeerId);
+    if (!runtime.serverStepTimer) {
+      const interval = Math.max(1, Math.round(SERVER_FIXED_STEP_MS));
+      runtime.serverStepTimer = setInterval(() => stepHostServer(), interval);
+    }
+    stepHostServer();
     if (runtime.stateBroadcastTimer) {
       return;
     }
@@ -923,6 +1164,10 @@
       return;
     }
     runtime.scene = scene;
+    if (runtime.role === 'host') {
+      ensureHostRegistry();
+      stepHostServer();
+    }
     if (runtime.lastDiag && typeof scene.updateNetDiagOverlay === 'function') {
       scene.updateNetDiagOverlay(runtime.lastDiag);
     }
@@ -966,6 +1211,11 @@
       clearInterval(runtime.stateBroadcastTimer);
       runtime.stateBroadcastTimer = null;
     }
+    if (runtime.serverStepTimer) {
+      clearInterval(runtime.serverStepTimer);
+      runtime.serverStepTimer = null;
+    }
+    runtime.registry = null;
     runtime.remotePlayers = [];
     runtime.remotePlayArea = null;
     runtime.peerInputs = {};
