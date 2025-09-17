@@ -97,10 +97,43 @@
 
       if (this.diagnosticsEnabled()) {
         const hitRadius = this.radius + this.hitPadding;
+        const sceneInput = scene.input || null;
+        const interactive = this.input || null;
+        const hitArea = interactive && interactive.hitArea ? interactive.hitArea : null;
+        const hitAreaType = hitArea
+          ? hitArea.type || (hitArea.constructor && hitArea.constructor.name) || null
+          : null;
+        const hitAreaSize = hitArea
+          ? {
+              radius: typeof hitArea.radius === 'number' ? hitArea.radius : null,
+              width:
+                typeof hitArea.width === 'number'
+                  ? hitArea.width
+                  : typeof hitArea.radius === 'number'
+                  ? hitArea.radius * 2
+                  : null,
+              height:
+                typeof hitArea.height === 'number'
+                  ? hitArea.height
+                  : typeof hitArea.radius === 'number'
+                  ? hitArea.radius * 2
+                  : null,
+            }
+          : null;
+
         this.logDiagnostics('setup', {
-          hasInput: !!this.input,
+          hasInput: !!interactive,
+          inputPlugin: {
+            enabled: sceneInput ? !!sceneInput.enabled : null,
+          },
           hitArea: { radius: hitRadius, diameter: hitRadius * 2 },
-          cursor: this.input ? this.input.cursor : null,
+          hitAreaMeta: hitArea
+            ? {
+                type: hitAreaType,
+                size: hitAreaSize,
+              }
+            : null,
+          cursor: interactive ? interactive.cursor : null,
           depths: {
             container: this.depth,
             outerRing: this.outerRing ? this.outerRing.depth : undefined,
