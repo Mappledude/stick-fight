@@ -814,22 +814,80 @@
       }
 
       const now = this.time && typeof this.time.now === 'number' ? this.time.now : Date.now();
-      const phase = now / 1000;
-      const sine = Math.sin(phase);
-      const cosine = Math.cos(phase * 0.5);
+      if (!this._joyTestSimState) {
+        this._joyTestSimState = {
+          nextTick: now,
+          stepIndex: -1,
+          pointerByPlayer: {},
+          sequence: [
+            { normX: 0.8, normY: 0.1, mirrorX: true },
+            { normX: 0.55, normY: -0.85, mirrorX: true },
+            { normX: 0, normY: -1, mirrorX: false },
+            { release: true },
+            { normX: -0.75, normY: 0.35, mirrorX: true },
+          ],
+        };
+      }
+
+      const state = this._joyTestSimState;
+      if (now < state.nextTick) {
+        return;
+      }
+
+      state.nextTick = now + 1000;
+      state.stepIndex = (state.stepIndex + 1) % state.sequence.length;
+      const step = state.sequence[state.stepIndex];
 
       const players = ['p1', 'p2'];
       for (let i = 0; i < players.length; i += 1) {
         const player = players[i];
-        const snapshot = this.joystickSnapshots[player];
-        if (!snapshot) {
+        const joystick = this.virtualJoysticks[player];
+        if (!joystick || !joystick.isEnabled()) {
           continue;
         }
-        snapshot.moveX = Phaser.Math.Clamp(sine, -1, 1);
-        snapshot.crouch = cosine > 0.6;
-        snapshot.jumpUp = cosine < -0.4;
-        snapshot.jumpForward = sine > 0.7;
-        snapshot.jumpBack = sine < -0.7;
+
+        let pointer = state.pointerByPlayer[player];
+        if (!pointer) {
+          const pointerId = `joytest:${player}`;
+          pointer = {
+            id: pointerId,
+            pointerId,
+            identifier: pointerId,
+            x: joystick.x,
+            y: joystick.y,
+            worldX: joystick.x,
+            worldY: joystick.y,
+          };
+          state.pointerByPlayer[player] = pointer;
+        }
+
+        if (step.release) {
+          if (joystick.pointerId !== null) {
+            joystick.handlePointerUp(pointer, 'joytest:release');
+          }
+          continue;
+        }
+
+        const applyPointerPosition = (targetX, targetY) => {
+          const radius = joystick.radius || JOYSTICK_RADIUS;
+          const clampedX = Phaser.Math.Clamp(targetX, -1, 1) * radius;
+          const clampedY = Phaser.Math.Clamp(targetY, -1, 1) * radius;
+          const worldX = joystick.x + clampedX;
+          const worldY = joystick.y + clampedY;
+          pointer.x = worldX;
+          pointer.y = worldY;
+          pointer.worldX = worldX;
+          pointer.worldY = worldY;
+        };
+
+        const targetNormX = step.mirrorX && player === 'p2' ? -step.normX : step.normX;
+        const targetNormY = step.normY;
+        applyPointerPosition(targetNormX, targetNormY);
+
+        if (joystick.pointerId === null) {
+          joystick.handlePointerDown(pointer, 'joytest:down');
+        }
+        joystick.handlePointerMove(pointer, 'joytest:move');
       }
     }
 
