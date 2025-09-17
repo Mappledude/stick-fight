@@ -386,10 +386,46 @@
         joystickRadius: JOYSTICK_RADIUS,
       };
       const nav = typeof navigator !== 'undefined' ? navigator : null;
-      const hasTouchSupport =
-        (nav && typeof nav.maxTouchPoints === 'number' && nav.maxTouchPoints > 0) ||
-        (typeof window !== 'undefined' && 'ontouchstart' in window);
-      this._keyboardDetected = !hasTouchSupport;
+      const win = typeof window !== 'undefined' ? window : null;
+
+      this._forceJoystick = false;
+      this._forceKeyboard = false;
+
+      const parseDebugFlag = (value) => {
+        if (typeof value !== 'string') {
+          return false;
+        }
+        const normalized = value.trim().toLowerCase();
+        return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+      };
+
+      if (win && win.location && typeof win.location.search === 'string') {
+        if (typeof URLSearchParams === 'function') {
+          const params = new URLSearchParams(win.location.search);
+          this._forceJoystick = parseDebugFlag(params.get('forceJoystick'));
+          this._forceKeyboard = parseDebugFlag(params.get('forceKeyboard'));
+        } else {
+          const searchLower = win.location.search.toLowerCase();
+          this._forceJoystick = /[?&]forcejoystick=(1|true|yes|on)\b/.test(searchLower);
+          this._forceKeyboard = /[?&]forcekeyboard=(1|true|yes|on)\b/.test(searchLower);
+        }
+      }
+
+      const hasTouchSupport = [
+        nav && typeof nav.maxTouchPoints === 'number' && nav.maxTouchPoints > 0,
+        nav && typeof nav.msMaxTouchPoints === 'number' && nav.msMaxTouchPoints > 0,
+        win && 'ontouchstart' in win,
+        win && typeof win.matchMedia === 'function' && win.matchMedia('(pointer: coarse)').matches,
+        this.sys?.game?.device?.input?.touch,
+      ].some(Boolean);
+
+      if (this._forceKeyboard) {
+        this._keyboardDetected = true;
+      } else if (this._forceJoystick) {
+        this._keyboardDetected = false;
+      } else {
+        this._keyboardDetected = !hasTouchSupport;
+      }
       this._fighters = [];
       this.safeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
       this.debugOverlayVisible = false;
@@ -434,11 +470,25 @@
       this.waitForValidSize(() => this.initWorldAndSpawn());
 
       const pointerDownHandler = (pointer) => {
-        if (pointer && (pointer.pointerType === 'touch' || pointer.pointerType === 'pen')) {
-          if (this._keyboardDetected) {
-            this._keyboardDetected = false;
-            this.updateTouchControlsVisibility();
-          }
+        if (this._forceKeyboard) {
+          return;
+        }
+        const pointerEventType = pointer?.event?.type;
+        const isTouchPointer =
+          !!pointer &&
+          (pointer.pointerType === 'touch' ||
+            pointer.pointerType === 'pen' ||
+            pointer.wasTouch === true ||
+            (typeof pointerEventType === 'string' && pointerEventType.startsWith('touch')));
+        if (!isTouchPointer) {
+          return;
+        }
+        const wasKeyboard = this._keyboardDetected;
+        if (wasKeyboard) {
+          this._keyboardDetected = false;
+        }
+        if (wasKeyboard || this._forceJoystick) {
+          this.updateTouchControlsVisibility();
         }
       };
       this.input.on('pointerdown', pointerDownHandler);
@@ -999,8 +1049,13 @@
       });
 
       const onJoystickInput = () => {
+        if (this._forceKeyboard) {
+          return;
+        }
         if (this._keyboardDetected) {
           this._keyboardDetected = false;
+          this.updateTouchControlsVisibility();
+        } else if (this._forceJoystick) {
           this.updateTouchControlsVisibility();
         }
       };
@@ -1326,6 +1381,17 @@
     }
 
     detectKeyboard() {
+      if (this._forceJoystick) {
+        this.updateTouchControlsVisibility();
+        return;
+      }
+      if (this._forceKeyboard) {
+        if (!this._keyboardDetected) {
+          this._keyboardDetected = true;
+        }
+        this.updateTouchControlsVisibility();
+        return;
+      }
       if (this._keyboardDetected) {
         return;
       }
@@ -1354,6 +1420,52 @@
         joystick.setVisible(visible);
         joystick.setControlEnabled(visible);
       });
+      if (visible) {
+        const hideLegacyDirectionalControl = (control) => {
+          if (!control) {
+            return;
+          }
+          const hideSingle = (item) => {
+            if (!item) {
+              return;
+            }
+            if (typeof item.setVisible === 'function') {
+              item.setVisible(false);
+            }
+            if (typeof item.setActive === 'function') {
+              item.setActive(false);
+            }
+            if (item.input) {
+              item.input.enabled = false;
+            }
+          };
+          if (Array.isArray(control)) {
+            control.forEach(hideSingle);
+            return;
+          }
+          hideSingle(control);
+          if (typeof control === 'object') {
+            hideLegacyDirectionalControl(control.left);
+            hideLegacyDirectionalControl(control.right);
+            hideLegacyDirectionalControl(control.up);
+            hideLegacyDirectionalControl(control.down);
+            if (control.container && control.container !== control) {
+              hideLegacyDirectionalControl(control.container);
+            }
+          }
+        };
+        [
+          this.legacyTouchControls,
+          this.legacyTouchButtons,
+          this.legacyDPad,
+          this.legacyDpad,
+          this.legacyDpadButtons,
+          this.dpad,
+          this.dpadContainer,
+          this.arrowControls,
+          this.arrowButtons,
+        ].forEach(hideLegacyDirectionalControl);
+      }
     }
 
     updateSafeAreaInsets() {
