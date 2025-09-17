@@ -9,7 +9,15 @@
 })(typeof window !== 'undefined' ? window : typeof globalThis !== 'undefined' ? globalThis : this, function (global) {
   'use strict';
 
-  const INLINE_CONFIG = null;
+  const INLINE_CONFIG = Object.freeze({
+    apiKey: 'AIzaSyCTrS0i1Xz9Ll9cSPYnS3sh2g6Pfm7eNcQ',
+    authDomain: 'stick-fight-pigeon.firebaseapp.com',
+    projectId: 'stick-fight-pigeon',
+    storageBucket: 'stick-fight-pigeon.appspot.com',
+    messagingSenderId: '1035698723456',
+    appId: '1:1035698723456:web:13b6cf2b2a9f4e12a8c7b1',
+    measurementId: 'G-8X0PQR1XYZ',
+  });
 
   const WINDOW_CONFIG_KEYS = Object.freeze([
     '__FIREBASE_CONFIG__',
@@ -186,6 +194,43 @@
     return readQueryFlag(scope, 'useInline', ['1']);
   };
 
+  const isNonProductionEnvironment = (scope) => {
+    let mode = '';
+
+    if (isObject(scope)) {
+      const boot = isObject(scope.__StickFightBoot) ? scope.__StickFightBoot : null;
+      if (boot) {
+        if (typeof boot.env === 'string' && boot.env) {
+          mode = boot.env;
+        } else if (typeof boot.mode === 'string' && boot.mode) {
+          mode = boot.mode;
+        }
+      }
+    }
+
+    if (!mode && typeof process !== 'undefined' && process && isObject(process.env)) {
+      const env = process.env;
+      const nodeEnv = typeof env.NODE_ENV === 'string' && env.NODE_ENV ? env.NODE_ENV : env.MODE;
+      if (typeof nodeEnv === 'string' && nodeEnv) {
+        mode = nodeEnv;
+      }
+    }
+
+    if (!mode && isObject(scope) && isObject(scope.location) && typeof scope.location.hostname === 'string') {
+      const host = scope.location.hostname.toLowerCase();
+      if (host === 'localhost' || host === '127.0.0.1') {
+        mode = 'development';
+      }
+    }
+
+    if (!mode) {
+      return false;
+    }
+
+    const normalized = mode.trim().toLowerCase();
+    return normalized !== 'production' && normalized !== 'prod';
+  };
+
   const readFirebaseInitOptions = (scope) => {
     if (!isObject(scope)) {
       return null;
@@ -233,6 +278,7 @@
   const resolveFirebaseConfig = (scope, inlineConfig, loggers) => {
     const safeMode = isSafeModeEnabled(scope, loggers);
     const allowInline = shouldAllowInlineConfig(scope);
+    const nonProduction = isNonProductionEnvironment(scope);
 
     const firebaseInitOptions = readFirebaseInitOptions(scope);
     if (firebaseInitOptions) {
@@ -256,9 +302,18 @@
       }
     }
 
-    if (allowInline && inlineConfig) {
-      const normalizedInline = normalizeFirebaseConfig(inlineConfig, 'inline', loggers);
-      return { config: normalizedInline, source: 'inline' };
+    if (allowInline && inlineConfig && nonProduction) {
+      const normalizedInline = normalizeFirebaseConfig(inlineConfig, 'inline-dev', loggers);
+      logInfo(
+        loggers,
+        'source=inline-dev projectId=' +
+          normalizedInline.projectId +
+          ' apiKeyLen=' +
+          normalizedInline.apiKey.length +
+          ' apiKeyHead=' +
+          normalizedInline.apiKey.slice(0, 6)
+      );
+      return { config: normalizedInline, source: 'inline-dev' };
     }
 
     logInfo(loggers, 'source=none');
@@ -321,6 +376,10 @@
     WINDOW_CONFIG_KEYS,
     REQUIRED_KEYS,
     OPTIONAL_REQUIRED_KEYS,
+    __test: Object.freeze({
+      getInlineConfig: () => INLINE_CONFIG,
+      isNonProductionEnvironment,
+    }),
   };
 
   if (isObject(global) && !global.__StickFightFirebaseConfigShared) {
