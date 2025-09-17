@@ -19,6 +19,9 @@
     if (typeof global === 'undefined') {
       return null;
     }
+    if (global.__FIREBASE_CONFIG__) {
+      return global.__FIREBASE_CONFIG__;
+    }
     if (global.STICK_FIGHT_FIREBASE_CONFIG) {
       return global.STICK_FIGHT_FIREBASE_CONFIG;
     }
@@ -60,34 +63,78 @@
     return firestoreInstance;
   };
 
-  const ensureAuth = () => {
-    if (netState.auth) {
-      return netState.auth;
-    }
-    const firebase = ensureFirebaseApp();
-    if (typeof firebase.auth !== 'function') {
-      throw new Error('Firebase Auth SDK is not available.');
-    }
-    const authInstance = firebase.auth();
-    netState.auth = authInstance;
-    return authInstance;
-  };
+// --- Auth bootstrap (namespaced Firebase v8 style) ---------------------------
+let _authInstance = null;
+let _signInPromise = null;
 
-  const ensureSignedInUser = async () => {
-    const auth = ensureAuth();
-    if (auth.currentUser) {
-      return { auth, user: auth.currentUser };
+/** Return the firebase.auth() singleton, initializing Firebase app if needed. */
+function ensureAuth() {
+  if (_authInstance) return _authInstance;
+
+  const firebase = ensureFirebaseApp
+    ? ensureFirebaseApp()                   // your existing helper
+    : (window.firebase || firebaseNamespace && firebaseNamespace());
+
+  if (!firebase || typeof firebase.auth !== 'function') {
+    throw new Error('Firebase Auth SDK is not available.');
+  }
+
+  _authInstance = firebase.auth();
+  return _authInstance;
+}
+
+/**
+ * Ensure there is a signed-in user (anonymous).
+ * - De-dupes concurrent calls via a shared promise.
+ * - Resolves with { auth, user }.
+ */
+async function ensureSignedInUser() {
+  const auth = ensureAuth();
+
+  // Already signed in?
+  if (auth.currentUser) {
+    return { auth, user: auth.currentUser };
+  }
+
+  // Another call is already signing in? await it.
+  if (_signInPromise) {
+    await _signInPromise;
+    if (!auth.currentUser) {
+      throw new Error('Anonymous sign-in finished but no currentUser present.');
     }
-    if (typeof auth.signInAnonymously === 'function') {
-      const result = await auth.signInAnonymously();
-      const user = (result && result.user) || auth.currentUser;
-      if (user) {
-        return { auth, user };
-      }
-      throw new Error('Failed to sign in anonymously.');
-    }
-    throw new Error('No authenticated user is available.');
-  };
+    return { auth, user: auth.currentUser };
+  }
+
+  // Start a new anonymous sign-in, memoized.
+  if (typeof auth.signInAnonymously !== 'function') {
+    throw new Error('Firebase Auth does not support anonymous sign-in.');
+  }
+
+  _signInPromise = auth.signInAnonymously()
+    .catch((err) => {
+      // Clear so future attempts can retry.
+      _signInPromise = null;
+      throw err;
+    })
+    .then((cred) => {
+      _signInPromise = null;
+      const user = (cred && cred.user) || auth.currentUser;
+      if (!user) throw new Error('Failed to sign in anonymously.');
+      return user;
+    });
+
+  const user = await _signInPromise;
+  return { auth, user };
+}
+
+/** Optional: legacy/compat alias for callers expecting a “ready” function. */
+function ensureAuthReady() {
+  return ensureSignedInUser().then(() => undefined);
+}
+
+// Exports (adjust to your module system)
+export { ensureAuth, ensureSignedInUser, ensureAuthReady };
+
 
   const getTimestampValue = () => {
     const firebase = firebaseNamespace();
@@ -179,6 +226,7 @@
   };
 
   const createRoom = async (options) => {
+    await ensureAuthReady();
     const firestore = ensureFirestore();
     const { auth, user } = await ensureSignedInUser();
     const currentUser = user || (auth && auth.currentUser);
@@ -231,6 +279,7 @@
   };
 
   const joinRoom = async (roomId, options) => {
+    await ensureAuthReady();
     const firestore = ensureFirestore();
     const { auth, user } = await ensureSignedInUser();
     const currentUser = user || (auth && auth.currentUser);
