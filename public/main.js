@@ -21,10 +21,15 @@
 
   Boot.milestone('main-script');
 
-  const FIREBASE_CONFIG = Boot.guard('config-ready', () => {
+  const FirebaseBootstrap = (() => {
     const scope = typeof window !== 'undefined' ? window : typeof globalThis !== 'undefined' ? globalThis : {};
-    const rawConfig = scope && scope.__FIREBASE_CONFIG__;
+    if (scope && typeof scope.__StickFightFirebaseBootstrap === 'object') {
+      return scope.__StickFightFirebaseBootstrap;
+    }
+    return null;
+  })();
 
+  const FIREBASE_ENV = Boot.guard('config-ready', () => {
     const logDiagnostic = (tag, message) => {
       if (Boot && typeof Boot.log === 'function') {
         Boot.log(tag, message);
@@ -77,54 +82,19 @@
       return null;
     };
 
-    if (!rawConfig || typeof rawConfig !== 'object') {
-      return showConfigFailure('missing firebase config');
+    if (!FirebaseBootstrap || typeof FirebaseBootstrap.bootstrap !== 'function') {
+      return showConfigFailure('missing firebase bootstrap helper');
     }
 
-    const requiredKeys = ['apiKey', 'authDomain', 'projectId', 'appId'];
-    const missingKeys = [];
-    for (let i = 0; i < requiredKeys.length; i += 1) {
-      const key = requiredKeys[i];
-      const value = rawConfig[key];
-      if (typeof value !== 'string' || value.trim() === '') {
-        missingKeys.push(key);
-      }
+    try {
+      return FirebaseBootstrap.bootstrap(Boot);
+    } catch (error) {
+      const detail = error && error.message ? error.message : String(error);
+      return showConfigFailure('firebase bootstrap failed', detail);
     }
-
-    if (missingKeys.length > 0) {
-      return showConfigFailure('invalid firebase config', 'missing=' + missingKeys.join('|'));
-    }
-
-    const origin = typeof location !== 'undefined' && location ? location.origin || location.href || 'unknown' : 'unknown';
-    const scriptNode = typeof document !== 'undefined' && document ? document.currentScript : null;
-    const scriptType = scriptNode && typeof scriptNode.type === 'string' && scriptNode.type ? scriptNode.type : 'classic';
-    const determineSdkFlavor = () => {
-      const firebaseNamespace = scope && scope.firebase ? scope.firebase : undefined;
-      if (!firebaseNamespace) {
-        return 'unloaded';
-      }
-      if (firebaseNamespace.SDK_VERSION) {
-        return 'firebase-js/' + firebaseNamespace.SDK_VERSION;
-      }
-      if (firebaseNamespace.apps && typeof firebaseNamespace.app === 'function') {
-        return 'firebase-js/compat';
-      }
-      if (typeof firebaseNamespace.initializeApp === 'function') {
-        return 'firebase-js/modular';
-      }
-      return 'firebase-js/unknown';
-    };
-
-    const sdkFlavor = determineSdkFlavor();
-
-    logDiagnostic('CFG', 'config-ready');
-    logDiagnostic('HOST', 'origin=' + origin + ' authDomain=' + rawConfig.authDomain);
-    logDiagnostic('INIT', 'script=' + scriptType + ' sdk=' + sdkFlavor);
-
-    return rawConfig;
   });
 
-  if (!FIREBASE_CONFIG) {
+  if (!FIREBASE_ENV) {
     if (Boot && typeof Boot.log === 'function') {
       Boot.log('BOOT', 'config guard aborted');
     }
@@ -358,31 +328,30 @@
       if (initialized) {
         return true;
       }
-      if (typeof firebase === 'undefined' || !firebase) {
+      if (!FIREBASE_ENV) {
         failed = true;
         return false;
       }
       try {
-        bootLog('INIT', 'firebase-initialize');
-        if (!firebase.apps || firebase.apps.length === 0) {
-          const config =
-            typeof window !== 'undefined' && window && window.STICKFIGHT_FIREBASE_CONFIG
-              ? window.STICKFIGHT_FIREBASE_CONFIG
-              : null;
-          if (!config) {
-            failed = true;
-            if (NET_DIAG_ENABLED) {
-              console.warn('[NetDiag] Missing STICKFIGHT_FIREBASE_CONFIG');
-            }
-            return false;
-          }
-          firebase.initializeApp(config);
+        bootLog('INIT', 'firebase-bootstrap');
+        firestoreInstance = FIREBASE_ENV.firestore || null;
+        if (!firestoreInstance && FIREBASE_ENV.firebase && typeof FIREBASE_ENV.firebase.firestore === 'function') {
+          firestoreInstance = FIREBASE_ENV.firebase.firestore();
         }
-        firestoreInstance = typeof firebase.firestore === 'function' ? firebase.firestore() : null;
-        fieldValue = firebase.firestore ? firebase.firestore.FieldValue : null;
-        initialized = true;
+        fieldValue = FIREBASE_ENV.fieldValue ||
+          (FIREBASE_ENV.firebase && FIREBASE_ENV.firebase.firestore
+            ? FIREBASE_ENV.firebase.firestore.FieldValue
+            : null);
+        initialized = !!firestoreInstance;
+        if (!initialized) {
+          failed = true;
+          if (NET_DIAG_ENABLED) {
+            console.warn('[NetDiag] Firestore instance unavailable');
+          }
+          return false;
+        }
         bootLog('INIT', 'firebase-ready');
-        return !!firestoreInstance;
+        return true;
       } catch (error) {
         failed = true;
         console.error('[StickFight] Firebase init failed', error);
