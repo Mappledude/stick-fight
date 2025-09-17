@@ -385,6 +385,7 @@
         margin: 28,
         joystickRadius: JOYSTICK_RADIUS,
       };
+      this.joyDiagEnabled = false;
       const nav = typeof navigator !== 'undefined' ? navigator : null;
       const win = typeof window !== 'undefined' ? window : null;
 
@@ -404,10 +405,12 @@
           const params = new URLSearchParams(win.location.search);
           this._forceJoystick = parseDebugFlag(params.get('forceJoystick'));
           this._forceKeyboard = parseDebugFlag(params.get('forceKeyboard'));
+          this.joyDiagEnabled = parseDebugFlag(params.get('joydiag'));
         } else {
           const searchLower = win.location.search.toLowerCase();
           this._forceJoystick = /[?&]forcejoystick=(1|true|yes|on)\b/.test(searchLower);
           this._forceKeyboard = /[?&]forcekeyboard=(1|true|yes|on)\b/.test(searchLower);
+          this.joyDiagEnabled = /[?&]joydiag=(1|true|yes|on)\b/.test(searchLower);
         }
       }
 
@@ -437,6 +440,7 @@
       this.safeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
       this.debugOverlayVisible = false;
       this.debugText = null;
+      this.joyDiagText = null;
       this._layoutReady = false;
       this._layoutReadyLogPrinted = false;
       this._resizeDebounceEvent = null;
@@ -470,6 +474,9 @@
       this.createTouchControls();
       this.registerKeyboardControls();
       this.createDebugOverlay();
+      if (this.joyDiagEnabled) {
+        this.createJoyDiagOverlay();
+      }
 
       this.scale.on('resize', this.handleResize, this);
       this.handleResize(this.scale.gameSize);
@@ -708,6 +715,7 @@
       (this._centeredElements || []).forEach((updatePosition) => updatePosition());
       this.positionTouchButtons();
       this.positionDebugOverlay();
+      this.positionJoyDiagOverlay();
 
       if (this._layoutReady) {
         this.refreshWorldBounds(size);
@@ -732,6 +740,9 @@
       this._fighters.forEach((fighter) => fighter.update(this.dt));
       this.resetMomentaryInputFlags();
       this.updateDebugOverlay();
+      if (this.joyDiagEnabled) {
+        this.updateJoyDiagOverlay();
+      }
     }
 
     reconcileInputState() {
@@ -1553,6 +1564,9 @@
       ];
       this.debugText.setText(lines.join('\n'));
       this.debugText.setVisible(this.debugOverlayVisible);
+      if (this.joyDiagEnabled) {
+        this.positionJoyDiagOverlay();
+      }
     }
 
     toggleDebugOverlay(forceState) {
@@ -1562,6 +1576,104 @@
         this.debugOverlayVisible = !this.debugOverlayVisible;
       }
       this.updateDebugOverlay();
+    }
+
+    createJoyDiagOverlay() {
+      if (!this.joyDiagEnabled) {
+        return;
+      }
+
+      const textStyle = {
+        fontFamily: 'Menlo, Monaco, Consolas, monospace',
+        fontSize: '16px',
+        color: '#888888',
+        align: 'center',
+      };
+
+      const p1Text = this.add.text(0, 0, '', textStyle).setOrigin(0.5, 0);
+      const p2Text = this.add.text(0, 0, '', textStyle).setOrigin(0.5, 0);
+
+      const container = this.add.container(0, 0, [p1Text, p2Text]);
+      container.setScrollFactor(0);
+      container.setDepth(41);
+      container.setAlpha(1);
+      container.setVisible(true);
+
+      this.joyDiagText = { container, p1: p1Text, p2: p2Text };
+      this.positionJoyDiagOverlay();
+      this.updateJoyDiagOverlay();
+    }
+
+    positionJoyDiagOverlay() {
+      if (!this.joyDiagEnabled || !this.joyDiagText || !this.joyDiagText.container) {
+        return;
+      }
+
+      const { width } = this.scale.gameSize;
+      const safeInsets = this.safeAreaInsets || {};
+      const topInset = typeof safeInsets.top === 'number' ? safeInsets.top : 0;
+      let topOffset = topInset + 12;
+
+      if (this.debugText && this.debugText.visible) {
+        topOffset += this.debugText.height + 8;
+      }
+
+      this.joyDiagText.container.setPosition(width / 2, topOffset);
+    }
+
+    updateJoyDiagOverlay() {
+      if (!this.joyDiagEnabled || !this.joyDiagText) {
+        return;
+      }
+
+      const { container, p1, p2 } = this.joyDiagText;
+      if (!container || !p1 || !p2) {
+        return;
+      }
+
+      const computeInfo = (player) => {
+        const joystick = this.virtualJoysticks[player];
+        const pointerCaptured = !!(joystick && joystick.pointerId !== null && joystick.isEnabled());
+        const vector = joystick ? joystick.getVector() : { x: 0, y: 0, magnitude: 0 };
+        const x = Number.isFinite(vector.x) ? Phaser.Math.Clamp(vector.x, -1, 1) : 0;
+        const y = Number.isFinite(vector.y) ? Phaser.Math.Clamp(vector.y, -1, 1) : 0;
+        const magnitude = Number.isFinite(vector.magnitude)
+          ? Phaser.Math.Clamp(vector.magnitude, 0, 1)
+          : 0;
+        const angle = magnitude > 0 ? Phaser.Math.RadToDeg(Math.atan2(y, x)) : 0;
+        return { pressed: pointerCaptured, x, y, magnitude, angle };
+      };
+
+      const formatValue = (value) => value.toFixed(2);
+      const formatAngle = (angle, magnitude) => (magnitude > 0 ? angle.toFixed(1) : '0.0');
+      const formatPressed = (pressed) => (pressed ? 'T' : 'F');
+
+      const p1Info = computeInfo('p1');
+      const p2Info = computeInfo('p2');
+
+      p1.setText(
+        `P1 Pressed:${formatPressed(p1Info.pressed)} X:${formatValue(p1Info.x)} Y:${formatValue(
+          p1Info.y
+        )} Angle:${formatAngle(p1Info.angle, p1Info.magnitude)}° Mag:${formatValue(
+          p1Info.magnitude
+        )}`
+      );
+      p2.setText(
+        `P2 Pressed:${formatPressed(p2Info.pressed)} X:${formatValue(p2Info.x)} Y:${formatValue(
+          p2Info.y
+        )} Angle:${formatAngle(p2Info.angle, p2Info.magnitude)}° Mag:${formatValue(
+          p2Info.magnitude
+        )}`
+      );
+
+      const spacing = 6;
+      p2.setY(p1.height + spacing);
+
+      p1.setColor(p1Info.pressed ? '#00ff66' : '#888888');
+      p2.setColor(p2Info.pressed ? '#00ff66' : '#888888');
+
+      container.setVisible(true);
+      this.positionJoyDiagOverlay();
     }
   }
 
