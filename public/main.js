@@ -2071,10 +2071,18 @@
         p1: { up: false, forward: false, back: false },
         p2: { up: false, forward: false, back: false },
       };
-      this._netDiagEnabled = NET_DIAG_ENABLED;
-      this.net = null;
-      this.signaling = null;
-      this.netOverlay = null;
+// --- Net diagnostics & networking fields (merged) ---
+this._netDiagEnabled = (typeof NET_DIAG_ENABLED !== 'undefined') ? NET_DIAG_ENABLED : false;
+
+// From NET-03 (diag UI)
+this.remotePlayerLabels = this.remotePlayerLabels || new Map();
+this.netDiagText       = (typeof this.netDiagText !== 'undefined') ? this.netDiagText : null;
+this._netDiagLast      = (typeof this._netDiagLast  !== 'undefined') ? this._netDiagLast  : null;
+
+// From main (core net handles)
+this.net        = this.net        || { role:null, roomId:null, peerId:null, pcMap:{}, dcMap:{}, peerInputs:{}, players:{} };
+this.signaling  = (typeof this.signaling  !== 'undefined') ? this.signaling  : null;
+this.netOverlay = (typeof this.netOverlay !== 'undefined') ? this.netOverlay : null;
     }
 
     getDefaultJoyDiagModes() {
@@ -2743,6 +2751,14 @@
 
       this.waitForValidSize(() => this.initWorldAndSpawn());
 
+      if (
+        typeof window !== 'undefined' &&
+        window.StickFightNetplay &&
+        typeof window.StickFightNetplay.attachScene === 'function'
+      ) {
+        window.StickFightNetplay.attachScene(this);
+      }
+
       const pointerDownHandler = (pointer) => {
         if (this._forceKeyboard) {
           return;
@@ -2772,10 +2788,22 @@
       this.setupNetworking();
       this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
         this.input.off('pointerdown', pointerDownHandler);
-        this.teardownNetworking();
+// --- scene/net teardown on shutdown ---
+this.destroyNetDiagOverlay && this.destroyNetDiagOverlay();
+this.clearRemotePlayerLabels && this.clearRemotePlayerLabels();
+
+if (typeof window !== 'undefined' &&
+    window.StickFightNetplay &&
+    typeof window.StickFightNetplay.detachScene === 'function') {
+  window.StickFightNetplay.detachScene(this);
+}
+
+// Ensure all networking resources are cleaned up as well
+this.teardownNetworking && this.teardownNetworking();
       });
     }
 
+    // --- Networking session resolution (keep from main) ---
     resolveNetSession() {
       const session = {
         roomId: null,
@@ -2799,9 +2827,7 @@
       }
 
       const applySession = (source) => {
-        if (!source) {
-          return;
-        }
+        if (!source) return;
         if (typeof source.roomId === 'string' && source.roomId.length > 0) {
           session.roomId = session.roomId || source.roomId;
         }
@@ -2845,6 +2871,7 @@
       return session;
     }
 
+    // --- Net state factory (keep from main) ---
     createNetState(role) {
       this.net = {
         role: role,
@@ -2858,11 +2885,12 @@
       };
     }
 
+    // --- Networking setup (keep from main) ---
     setupNetworking() {
       const session = this.resolveNetSession();
       if (!session.roomId || !session.peerId) {
         if (this._netDiagEnabled) {
-          netDiagLog('setup:skipped', { reason: 'missing session', session });
+          netDiagLog('setup:skipped', { reason: 'missing session', session: session });
         }
         return;
       }
@@ -2879,14 +2907,16 @@
       this.createNetState(session.isHost ? 'host' : 'guest');
 
       const signaling = new Signaling({
-        db,
-        fieldValue,
+        db: db,
+        fieldValue: fieldValue,
         roomId: session.roomId,
         peerId: session.peerId,
         isHost: session.isHost,
         hostPeerId: session.hostPeerId,
         scene: this,
         netdiag: this._netDiagEnabled,
+      });
+
       });
 
       this.signaling = signaling;
@@ -3404,7 +3434,12 @@
       (this._centeredElements || []).forEach((updatePosition) => updatePosition());
       this.positionTouchButtons();
       this.positionDebugOverlay();
-      this.positionNetOverlay();
+// Position any networking diagnostics overlay (support both names)
+if (typeof this.positionNetDiagOverlay === 'function') {
+  this.positionNetDiagOverlay();
+} else if (typeof this.positionNetOverlay === 'function') {
+  this.positionNetOverlay();
+}
 
       if (this._layoutReady) {
         this.refreshWorldBounds(size);
@@ -4873,6 +4908,7 @@
     updateSafeAreaInsets() {
       if (typeof window === 'undefined' || !window.getComputedStyle) {
         this.safeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+        this.positionNetDiagOverlay();
         return;
       }
       const root = document.documentElement;
@@ -4887,6 +4923,7 @@
         bottom: parseInset('--safe-area-inset-bottom'),
         left: parseInset('--safe-area-inset-left'),
       };
+      this.positionNetDiagOverlay();
     }
 
     createDebugOverlay() {
@@ -4935,6 +4972,174 @@
       const hudText = this.renderDiagHUD();
       this.debugText.setText(hudText || '');
       this.debugText.setVisible(true);
+    }
+
+    createNetDiagOverlay() {
+      if (this.netDiagText || !this.add || typeof this.add.text !== 'function') {
+        return;
+      }
+      const text = this.add
+        .text(0, 0, '', {
+          fontFamily: 'Menlo, Monaco, Consolas, monospace',
+          fontSize: '12px',
+          color: '#b2f3ff',
+          align: 'right',
+          backgroundColor: 'rgba(6, 12, 20, 0.72)',
+        })
+        .setOrigin(1, 0)
+        .setScrollFactor(0)
+        .setDepth(52);
+      text.setPadding(8, 6, 10, 6);
+      if (typeof text.setStroke === 'function') {
+        text.setStroke('#0bb4ff', 1);
+      }
+      text.setVisible(false);
+      this.netDiagText = text;
+      this.positionNetDiagOverlay();
+    }
+
+    positionNetDiagOverlay() {
+      if (!this.netDiagText) {
+        return;
+      }
+      const safeInsets = this.safeAreaInsets || {};
+      const topInset = typeof safeInsets.top === 'number' ? safeInsets.top : 0;
+      const rightInset = typeof safeInsets.right === 'number' ? safeInsets.right : 0;
+      const topOffset = topInset + 12;
+      const rightOffset = rightInset + 12;
+      let width = 0;
+      if (this.scale && this.scale.gameSize) {
+        width = this.scale.gameSize.width || 0;
+      } else if (typeof window !== 'undefined') {
+        width = window.innerWidth || 0;
+      }
+      const x = Math.max(width - rightOffset, 0);
+      this.netDiagText.setPosition(x, topOffset);
+    }
+
+    updateNetDiagOverlay(diag) {
+      this._netDiagLast = diag || null;
+      if (!diag || !diag.visible) {
+        if (this.netDiagText) {
+          this.netDiagText.setText('');
+          this.netDiagText.setVisible(false);
+        }
+        return;
+      }
+      if (!this.netDiagText) {
+        this.createNetDiagOverlay();
+      }
+      if (!this.netDiagText) {
+        return;
+      }
+      const formatAge = (value) => {
+        if (!Number.isFinite(value)) {
+          return '—';
+        }
+        if (value < 1) {
+          return '<1ms';
+        }
+        if (value >= 1000) {
+          const seconds = value / 1000;
+          return `${Math.round(seconds * 100) / 100}s`;
+        }
+        return `${Math.round(value)}ms`;
+      };
+      const roleLabel = diag.role ? String(diag.role).toUpperCase() : 'SOLO';
+      const peers = Number.isFinite(diag.peers) ? diag.peers : 0;
+      const inputAge = formatAge(diag.inputAgeMs);
+      const stateAge = formatAge(diag.stateAgeMs);
+      const lines = [`Role: ${roleLabel}`, `Peers: ${peers}`, `Input: ${inputAge}`, `State: ${stateAge}`];
+      this.netDiagText.setText(lines.join('\n'));
+      this.netDiagText.setVisible(true);
+      this.positionNetDiagOverlay();
+    }
+
+    destroyNetDiagOverlay() {
+      if (this.netDiagText) {
+        this.netDiagText.destroy();
+        this.netDiagText = null;
+      }
+    }
+
+    renderRemotePlayers(players) {
+      const list = Array.isArray(players) ? players : [];
+      if (!this.remotePlayerLabels) {
+        this.remotePlayerLabels = new Map();
+      }
+      const seen = new Set();
+      list.forEach((player) => {
+        if (!player || !player.id) {
+          return;
+        }
+        seen.add(player.id);
+        let label = this.remotePlayerLabels.get(player.id);
+        if (!label) {
+          if (!this.add || typeof this.add.text !== 'function') {
+            return;
+          }
+          label = this.add
+            .text(0, 0, '', {
+              fontFamily: 'Inter, "Segoe UI", sans-serif',
+              fontSize: '14px',
+              color: '#f6fbff',
+              align: 'center',
+              backgroundColor: 'rgba(6, 12, 20, 0.5)',
+            })
+            .setOrigin(0.5, 1)
+            .setDepth(31);
+          this.remotePlayerLabels.set(player.id, label);
+        }
+        const name = typeof player.name === 'string' && player.name.trim() ? player.name.trim() : 'Player';
+        label.setText(name);
+        const x = Number.isFinite(player.x) ? player.x : 0;
+        const y = Number.isFinite(player.y) ? player.y : 0;
+        label.setPosition(x, y - 46);
+        label.setVisible(true);
+      });
+      this.remotePlayerLabels.forEach((label, id) => {
+        if (!seen.has(id)) {
+          label.setVisible(false);
+        }
+      });
+    }
+
+    clearRemotePlayerLabels() {
+      if (!this.remotePlayerLabels) {
+        return;
+      }
+      this.remotePlayerLabels.forEach((label) => {
+        if (label && typeof label.destroy === 'function') {
+          label.destroy();
+        }
+      });
+      this.remotePlayerLabels.clear();
+    }
+
+    clearNetworkMomentaryFlags(slot) {
+      const state = this.getPlayerInput(slot);
+      if (!state) {
+        return;
+      }
+      state.punchPressed = false;
+      state.kickPressed = false;
+      state.jumpUp = false;
+      state.jumpForward = false;
+      state.jumpBack = false;
+    }
+
+    getFighterSnapshots() {
+      const fighters = Array.isArray(this._fighters) ? this._fighters : [];
+      return fighters.map((fighter, index) => {
+        const slot = index === 0 ? 'p1' : 'p2';
+        if (!fighter) {
+          return { slot, x: 0, y: 0, hp: 100 };
+        }
+        const hp = typeof fighter.hp === 'number' && Number.isFinite(fighter.hp) ? fighter.hp : 100;
+        const x = typeof fighter.x === 'number' && Number.isFinite(fighter.x) ? fighter.x : 0;
+        const y = typeof fighter.y === 'number' && Number.isFinite(fighter.y) ? fighter.y : 0;
+        return { slot, x, y, hp };
+      });
     }
 
     toggleDebugOverlay(forceState) {
