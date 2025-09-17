@@ -950,6 +950,7 @@
   const JOYSTICK_JUMP_HORIZONTAL_THRESHOLD = 0.32;
   const JOYSTICK_CROUCH_THRESHOLD = 0.45;
   const GRAVITY_Y = 2200;
+  const FIXED_DT = 1 / 60;
   const MIN_LAYOUT_WIDTH = 320;
   const MIN_LAYOUT_HEIGHT = 180;
   const LAYOUT_POLL_INTERVAL = 16;
@@ -1895,6 +1896,9 @@
     constructor() {
       super({ key: 'MainScene' });
       this.dt = 0;
+      this._simAcc = 0;
+      this._simTickCount = 0;
+      this._simTickLogTimer = 0;
       this._centeredElements = [];
       this.titleText = null;
       this.p1Input = this.createPlayerInputState();
@@ -3456,6 +3460,38 @@ if (typeof this.positionNetDiagOverlay === 'function') {
     update(time, delta) {
       this.dt = Math.min(delta, 50) / 1000;
 
+      const role = this.net && typeof this.net.role === 'string' ? this.net.role : null;
+      if (role === 'host') {
+        const stepDelta = Math.min(delta / 1000, 0.1);
+        this._simAcc += stepDelta;
+        if (this._netDiagEnabled) {
+          this._simTickLogTimer += stepDelta;
+        }
+        while (this._simAcc >= FIXED_DT) {
+          this.serverFixedStep(FIXED_DT);
+          this._simAcc -= FIXED_DT;
+          if (this._netDiagEnabled) {
+            this._simTickCount += 1;
+          }
+        }
+        if (this._netDiagEnabled && this._simTickLogTimer >= 1) {
+          const seconds = this._simTickLogTimer;
+          const ticks = this._simTickCount;
+          const rate = seconds > 0 ? ticks / seconds : 0;
+          netDiagLog('sim:ticks-per-sec', {
+            ticks,
+            seconds,
+            rate,
+          });
+          this._simTickLogTimer = 0;
+          this._simTickCount = 0;
+        }
+      } else {
+        this._simAcc = 0;
+        this._simTickCount = 0;
+        this._simTickLogTimer = 0;
+      }
+
       this._joyDiagFrameIndex = (this._joyDiagFrameIndex || 0) + 1;
       const diagnosticsActive = this.diagnosticsActive();
       if (diagnosticsActive) {
@@ -3517,6 +3553,10 @@ if (typeof this.positionNetDiagOverlay === 'function') {
       if (this._joyDiagFrameState) {
         this.flushJoyDiagFrameDiagnostics();
       }
+    }
+
+    serverFixedStep(dt) {
+      // noop for now
     }
 
     reconcileInputState() {
