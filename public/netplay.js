@@ -4,6 +4,7 @@
   const PROTOCOL_VERSION = 1;
   const INPUT_SEND_INTERVAL_MS = 50;
   const STATE_SEND_INTERVAL_MS = 120;
+  const FALLBACK_STATE_MIN_INTERVAL_MS = 200;
   const INPUT_STALE_MS = 1500;
   const DIAG_UPDATE_INTERVAL_MS = 250;
   const RATE_LOG_INTERVAL_MS = 5000;
@@ -22,6 +23,7 @@
     localSlot: 'p1',
     slotAssignments: {},
     playerDirectory: {},
+    playerPeerIdsByUid: {},
     connections: new Map(),
     peerInputs: {},
     remotePlayers: [],
@@ -43,6 +45,8 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
     guestCandidateUnsub: null,
     stateBroadcastTimer: null,
     serverStepTimer: null,
+    hostTick: 0,
+    lastFallbackStateWriteAt: null,
   };
 
   function detectDiagnosticsFlag() {
@@ -236,7 +240,11 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
 
     registry.fixedStep(dt);
 
-    runtime.tick = (runtime.tick + 1) >>> 0;
+// Host authoritative tick (uint32 wrap). Guests mirror this from snapshots.
+runtime.hostTick = ((runtime.hostTick ?? 0) + 1) >>> 0;
+
+// Back-compat alias: keep runtime.tick in sync for any legacy reads.
+runtime.tick = runtime.hostTick;
 
     const snapshot = registry.getPlayers();
     runtime.remotePlayers = snapshot
@@ -453,10 +461,27 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
       (snapshot) => {
         snapshot.docChanges().forEach((change) => {
           const doc = change.doc;
-          const peerId = doc.id;
-          const data = doc.data() || {};
-          const name = data.name || 'Player';
+          if (!doc) {
+            return;
+          }
+          const uid = doc.id;
+          const data = (typeof doc.data === 'function' ? doc.data() : {}) || {};
+          const peerId = data.peerId || (uid ? runtime.playerPeerIdsByUid[uid] : null);
+          if (!peerId) {
+            if (change.type === 'removed' && uid && runtime.playerPeerIdsByUid[uid]) {
+              const storedPeerId = runtime.playerPeerIdsByUid[uid];
+              delete runtime.playerPeerIdsByUid[uid];
+              removePlayerFromDirectory(storedPeerId);
+              if (runtime.role === 'host') {
+                teardownConnection(storedPeerId);
+              }
+            } else if (change.type !== 'removed') {
+              console.warn('[Net] Player document missing peerId', { uid });
+            }
+            return;
+          }
           if (change.type === 'removed') {
+            delete runtime.playerPeerIdsByUid[uid];
             removePlayerFromDirectory(peerId);
             if (
               runtime.role === 'host' &&
@@ -474,30 +499,32 @@ this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remote
             }
             return;
           }
+
+          runtime.playerPeerIdsByUid[uid] = peerId;
+          const name = data.name || 'Player';
           updatePlayerDirectory(peerId, name);
-if (runtime.role === 'host' && peerId !== runtime.localPeerId) {
-  ensureHostConnection(peerId);
-}
-if (
-  change.type === 'added' &&
-  runtime.role === 'host' &&
-  runtime.scene &&
-  typeof runtime.scene.onNetPeerJoined === 'function'
-) {
-  try {
-    runtime.scene.onNetPeerJoined(peerId, { isLocal: peerId === runtime.localPeerId });
-  } catch (err) {
-    console.warn('[Net] Failed to notify scene of peer join', err);
-  }
-}
 
           if (!runtime.slotAssignments.p1 && data.isHost) {
             runtime.slotAssignments.p1 = peerId;
           }
+
           if (runtime.role === 'host') {
             ensureHostServerPlayer(peerId);
             if (peerId !== runtime.localPeerId) {
               ensureHostConnection(peerId);
+            }
+          }
+
+          if (
+            change.type === 'added' &&
+            runtime.role === 'host' &&
+            runtime.scene &&
+            typeof runtime.scene.onNetPeerJoined === 'function'
+          ) {
+            try {
+              runtime.scene.onNetPeerJoined(peerId, { isLocal: peerId === runtime.localPeerId });
+            } catch (err) {
+              console.warn('[Net] Failed to notify scene of peer join', err);
             }
           }
         });
@@ -782,6 +809,8 @@ if (
   function startHostRuntime() {
     ensureHostRegistry();
     ensureHostServerPlayer(runtime.localPeerId);
+    runtime.hostTick = 0;
+    runtime.lastFallbackStateWriteAt = null;
     if (!runtime.serverStepTimer) {
       const interval = Math.max(1, Math.round(SERVER_FIXED_STEP_MS));
       runtime.serverStepTimer = setInterval(() => stepHostServer(), interval);
@@ -848,6 +877,7 @@ if (
       return;
     }
     let sentCount = 0;
+    let hasOpenStateChannel = false;
     runtime.connections.forEach((connection) => {
       if (!connection || !connection.stateChannel) {
         return;
@@ -855,6 +885,7 @@ if (
       if (connection.stateChannel.readyState !== 'open') {
         return;
       }
+      hasOpenStateChannel = true;
       try {
         connection.stateChannel.send(serialized);
         connection.lastStateSentAt = now;
@@ -866,7 +897,55 @@ if (
     });
     if (sentCount > 0) {
       runtime.lastStateBroadcastAt = now;
+      return;
     }
+
+    if (hasOpenStateChannel) {
+      return;
+    }
+
+    maybeWriteFallbackState(snapshot);
+  }
+
+  function maybeWriteFallbackState(snapshot) {
+    if (runtime.role !== 'host') {
+      return;
+    }
+    if (!runtime.roomRef) {
+      return;
+    }
+    if (!snapshot || typeof snapshot !== 'object') {
+      return;
+    }
+    const now = Date.now();
+    if (
+      Number.isFinite(runtime.lastFallbackStateWriteAt) &&
+      now - runtime.lastFallbackStateWriteAt < FALLBACK_STATE_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    runtime.lastFallbackStateWriteAt = now;
+
+    const net = getStickFightNet();
+    const fieldValue = net && net.state ? net.state.fieldValue : null;
+    const updatedAt =
+      fieldValue && typeof fieldValue.serverTimestamp === 'function'
+        ? fieldValue.serverTimestamp()
+        : new Date(now);
+
+    const payload = {
+      tick: Number.isFinite(runtime.hostTick) ? runtime.hostTick : 0,
+      state: snapshot,
+      updatedAt,
+    };
+
+    runtime.roomRef
+      .set(payload, { merge: true })
+      .catch((error) => {
+        console.error('[Net] Failed to write fallback state snapshot', error);
+        runtime.lastFallbackStateWriteAt = null;
+      });
   }
 
   function sendIceCandidate(docId, candidate, from) {
@@ -1224,6 +1303,8 @@ if (
       clearInterval(runtime.serverStepTimer);
       runtime.serverStepTimer = null;
     }
+    runtime.hostTick = 0;
+    runtime.lastFallbackStateWriteAt = null;
     runtime.registry = null;
     runtime.tick = 0;
     runtime.remotePlayers = [];
