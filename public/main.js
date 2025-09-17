@@ -39,6 +39,897 @@
     };
   })();
 
+  function getLocationSearch() {
+    if (typeof window === 'undefined' || !window.location) {
+      return '';
+    }
+    const search = window.location.search;
+    return typeof search === 'string' ? search : '';
+  }
+
+  function parseBoolFlag(value) {
+    if (typeof value !== 'string') {
+      return false;
+    }
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+    return (
+      normalized === '1' ||
+      normalized === 'true' ||
+      normalized === 'yes' ||
+      normalized === 'on'
+    );
+  }
+
+  const NET_QUERY_PARAMS = (() => {
+    const result = {
+      netdiag: false,
+      room: null,
+      peer: null,
+      role: null,
+      hostPeerId: null,
+    };
+
+    const search = getLocationSearch();
+    if (!search) {
+      return result;
+    }
+
+    const assignParam = (key, value) => {
+      if (typeof value === 'string' && value.length > 0) {
+        result[key] = value;
+      }
+    };
+
+    if (typeof URLSearchParams === 'function') {
+      try {
+        const params = new URLSearchParams(search);
+        result.netdiag = parseBoolFlag(params.get('netdiag'));
+        assignParam('room', params.get('room'));
+        assignParam('peer', params.get('peer'));
+        assignParam('role', params.get('role'));
+        assignParam('hostPeerId', params.get('hostPeerId'));
+        if (!result.role && parseBoolFlag(params.get('host'))) {
+          result.role = 'host';
+        }
+        if (!result.role && parseBoolFlag(params.get('isHost'))) {
+          result.role = 'host';
+        }
+      } catch (error) {
+        // Ignore parsing errors and fall back to regex-based extraction below.
+      }
+    }
+
+    const lowerSearch = search.toLowerCase();
+    if (!result.netdiag) {
+      result.netdiag = /[?&]netdiag=(1|true|yes|on)\b/.test(lowerSearch);
+    }
+    if (!result.room) {
+      const roomMatch = search.match(/[?&]room=([^&#]*)/i);
+      assignParam('room', roomMatch ? decodeURIComponent(roomMatch[1]) : null);
+    }
+    if (!result.peer) {
+      const peerMatch = search.match(/[?&]peer=([^&#]*)/i);
+      assignParam('peer', peerMatch ? decodeURIComponent(peerMatch[1]) : null);
+    }
+    if (!result.role) {
+      if (/[?&](role|netrole)=host\b/i.test(lowerSearch)) {
+        result.role = 'host';
+      }
+    }
+    if (!result.hostPeerId) {
+      const hostPeerMatch = search.match(/[?&]hostpeerid=([^&#]*)/i);
+      assignParam('hostPeerId', hostPeerMatch ? decodeURIComponent(hostPeerMatch[1]) : null);
+    }
+
+    return result;
+  })();
+
+  const NET_DIAG_ENABLED = !!NET_QUERY_PARAMS.netdiag;
+
+  function netDiagLog(tag, payload) {
+    if (!NET_DIAG_ENABLED) {
+      return;
+    }
+    if (typeof console === 'undefined' || !console || typeof console.log !== 'function') {
+      return;
+    }
+    if (typeof payload === 'undefined') {
+      console.log('[NetDiag]', tag);
+      return;
+    }
+    console.log('[NetDiag]', tag, payload);
+  }
+
+  function createPeerConnection() {
+    var cfg = {
+      iceServers: [
+        { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+      ],
+      sdpSemantics: 'unified-plan',
+    };
+    var pc = new RTCPeerConnection(cfg);
+    if (NET_DIAG_ENABLED) {
+      console.log('[NetDiag] createPeerConnection', { iceServers: cfg.iceServers });
+      pc.addEventListener('iceconnectionstatechange', function () {
+        console.log('[NetDiag] iceConnectionState', pc.iceConnectionState);
+      });
+      pc.addEventListener('connectionstatechange', function () {
+        console.log('[NetDiag] connectionState', pc.connectionState);
+      });
+    }
+    return pc;
+  }
+
+  const FirebaseRuntime = (() => {
+    let initialized = false;
+    let failed = false;
+    let firestoreInstance = null;
+    let fieldValue = null;
+
+    const ensureApp = () => {
+      if (failed) {
+        return false;
+      }
+      if (initialized) {
+        return true;
+      }
+      if (typeof firebase === 'undefined' || !firebase) {
+        failed = true;
+        return false;
+      }
+      try {
+        if (!firebase.apps || firebase.apps.length === 0) {
+          const config =
+            typeof window !== 'undefined' && window && window.STICKFIGHT_FIREBASE_CONFIG
+              ? window.STICKFIGHT_FIREBASE_CONFIG
+              : null;
+          if (!config) {
+            failed = true;
+            if (NET_DIAG_ENABLED) {
+              console.warn('[NetDiag] Missing STICKFIGHT_FIREBASE_CONFIG');
+            }
+            return false;
+          }
+          firebase.initializeApp(config);
+        }
+        firestoreInstance = typeof firebase.firestore === 'function' ? firebase.firestore() : null;
+        fieldValue = firebase.firestore ? firebase.firestore.FieldValue : null;
+        initialized = true;
+        return !!firestoreInstance;
+      } catch (error) {
+        failed = true;
+        console.error('[StickFight] Firebase init failed', error);
+        return false;
+      }
+    };
+
+    return {
+      getFirestore() {
+        if (!ensureApp()) {
+          return null;
+        }
+        return firestoreInstance;
+      },
+      getFieldValue() {
+        if (!ensureApp()) {
+          return null;
+        }
+        return fieldValue;
+      },
+    };
+  })();
+
+  function serializeSessionDescription(desc) {
+    if (!desc) {
+      return null;
+    }
+    return { type: desc.type, sdp: desc.sdp };
+  }
+
+  class Signaling {
+    constructor(options) {
+      const opts = options || {};
+      this.db = opts.db || null;
+      this.fieldValue = opts.fieldValue || null;
+      this.roomId = opts.roomId || null;
+      this.peerId = opts.peerId || null;
+      this.isHost = !!opts.isHost;
+      this.scene = opts.scene || null;
+      this.netdiag = !!opts.netdiag;
+      this.hostPeerId = opts.hostPeerId || (this.isHost ? this.peerId : null);
+      this.started = false;
+      this.playersUnsub = null;
+      this.roomUnsub = null;
+      this.signalUnsubs = {};
+      this.peerEntries = {};
+      this.stopped = false;
+    }
+
+    getRoomRef() {
+      if (!this.db || typeof this.db.collection !== 'function' || !this.roomId) {
+        return null;
+      }
+      return this.db.collection('rooms').doc(this.roomId);
+    }
+
+    getSignalDocRef(peerId) {
+      const roomRef = this.getRoomRef();
+      if (!roomRef || typeof roomRef.collection !== 'function' || !peerId) {
+        return null;
+      }
+      return roomRef.collection('signals').doc(peerId);
+    }
+
+    start() {
+      if (this.started) {
+        return;
+      }
+      this.started = true;
+      this.stopped = false;
+      this.ensureOwnSignalDoc();
+    }
+
+    ensureOwnSignalDoc() {
+      const docRef = this.getSignalDocRef(this.peerId);
+      if (!docRef || !this.fieldValue) {
+        return;
+      }
+      const payload = {
+        role: this.isHost ? 'host' : 'guest',
+        ice: [],
+        updatedAt: typeof this.fieldValue.serverTimestamp === 'function'
+          ? this.fieldValue.serverTimestamp()
+          : null,
+      };
+      if (typeof this.fieldValue.delete === 'function') {
+        payload.offer = this.fieldValue.delete();
+        payload.answer = this.fieldValue.delete();
+      }
+      this.logSignalWrite(this.peerId, ['role', 'offer', 'answer', 'ice', 'updatedAt']);
+      docRef
+        .set(payload, { merge: true })
+        .catch((error) => {
+          console.error('[StickFight] Failed to init signal doc', error);
+        });
+    }
+
+    stop() {
+      if (this.stopped) {
+        return;
+      }
+      this.stopped = true;
+      this.started = false;
+      if (this.playersUnsub) {
+        this.playersUnsub();
+        this.playersUnsub = null;
+      }
+      if (this.roomUnsub) {
+        this.roomUnsub();
+        this.roomUnsub = null;
+      }
+      const keys = Object.keys(this.signalUnsubs);
+      for (let i = 0; i < keys.length; i += 1) {
+        const key = keys[i];
+        const unsub = this.signalUnsubs[key];
+        if (typeof unsub === 'function') {
+          unsub();
+        }
+        this.signalUnsubs[key] = null;
+      }
+      const peerIds = Object.keys(this.peerEntries);
+      for (let j = 0; j < peerIds.length; j += 1) {
+        const peerId = peerIds[j];
+        const entry = this.peerEntries[peerId];
+        if (!entry) {
+          continue;
+        }
+        if (entry.inputDc) {
+          try {
+            entry.inputDc.close();
+          } catch (error) {}
+        }
+        if (entry.stateDc) {
+          try {
+            entry.stateDc.close();
+          } catch (error) {}
+        }
+        if (entry.pc) {
+          try {
+            entry.pc.close();
+          } catch (error) {}
+        }
+      }
+      this.peerEntries = {};
+      const scene = this.scene;
+      if (scene && scene.net) {
+        scene.net.pcMap = {};
+        scene.net.dcMap = {};
+        scene.net.inputDc = null;
+        scene.net.stateDc = null;
+        scene.net.rtts = {};
+        if (typeof scene.updateNetOverlay === 'function') {
+          scene.updateNetOverlay();
+        }
+      }
+    }
+
+    ensurePeerEntry(peerId) {
+      if (!this.peerEntries[peerId]) {
+        this.peerEntries[peerId] = {
+          pc: null,
+          inputDc: null,
+          stateDc: null,
+          signalUnsub: null,
+          remoteIceCount: 0,
+          offerHandled: false,
+          answerHandled: false,
+          lastOfferSdp: null,
+          lastAnswerSdp: null,
+        };
+      }
+      return this.peerEntries[peerId];
+    }
+
+    registerPeerConnection(peerId, pc) {
+      const scene = this.scene;
+      if (scene) {
+        if (!scene.net) {
+          scene.net = {
+            role: this.isHost ? 'host' : 'guest',
+            pcMap: {},
+            dcMap: {},
+            inputDc: null,
+            stateDc: null,
+            rtts: {},
+            lastOfferTs: null,
+            lastAnswerTs: null,
+          };
+        }
+        scene.net.role = this.isHost ? 'host' : 'guest';
+        scene.net.pcMap[peerId] = pc;
+        if (typeof scene.updateNetOverlay === 'function') {
+          scene.updateNetOverlay();
+        }
+      }
+      if (this.netdiag) {
+        console.log('[NetDiag] register PC', { peerId, role: this.isHost ? 'host' : 'guest' });
+      }
+    }
+
+    registerDataChannel(peerId, channel, label, isLocal) {
+      if (!channel) {
+        return;
+      }
+      const scene = this.scene;
+      if (scene && scene.net) {
+        if (!scene.net.dcMap[peerId]) {
+          scene.net.dcMap[peerId] = {};
+        }
+        scene.net.dcMap[peerId][label] = channel;
+        if (!this.isHost && label === 'input') {
+          scene.net.inputDc = channel;
+        }
+        if (!this.isHost && label === 'state') {
+          scene.net.stateDc = channel;
+        }
+      }
+
+      const self = this;
+      channel.addEventListener('open', () => {
+        if (self.netdiag) {
+          console.log('[NetDiag] datachannel open', { peerId, label });
+        }
+        if (scene && typeof scene.updateNetOverlay === 'function') {
+          scene.updateNetOverlay();
+        }
+      });
+      channel.addEventListener('close', () => {
+        if (self.netdiag) {
+          console.log('[NetDiag] datachannel close', { peerId, label });
+        }
+        if (scene && typeof scene.updateNetOverlay === 'function') {
+          scene.updateNetOverlay();
+        }
+      });
+      channel.addEventListener('error', (event) => {
+        if (!self.netdiag) {
+          return;
+        }
+        console.error('[NetDiag] datachannel error', { peerId, label, event });
+      });
+
+      if (!this.isHost && !isLocal && label === 'state') {
+        channel.onmessage = (ev) => {
+          if (self.netdiag) {
+            console.log('[NetDiag] state channel message', {
+              peerId,
+              bytes: ev && typeof ev.data === 'string' ? ev.data.length : null,
+            });
+          }
+        };
+      }
+    }
+
+    appendIce(peerId, candidate) {
+      if (!candidate) {
+        return Promise.resolve();
+      }
+      const docRef = this.getSignalDocRef(peerId);
+      if (
+        !docRef ||
+        !this.fieldValue ||
+        typeof this.fieldValue.arrayUnion !== 'function'
+      ) {
+        return Promise.resolve();
+      }
+      const payload = {
+        ice: this.fieldValue.arrayUnion({
+          candidate: candidate.candidate,
+          sdpMid: typeof candidate.sdpMid === 'string' ? candidate.sdpMid : null,
+          sdpMLineIndex:
+            typeof candidate.sdpMLineIndex === 'number' ? candidate.sdpMLineIndex : null,
+          ts: Date.now(),
+        }),
+        updatedAt: typeof this.fieldValue.serverTimestamp === 'function'
+          ? this.fieldValue.serverTimestamp()
+          : null,
+      };
+      this.logSignalWrite(peerId, ['ice', 'updatedAt']);
+      return docRef.set(payload, { merge: true }).catch((error) => {
+        console.error('[StickFight] appendIce failed', error);
+      });
+    }
+
+    writeSignal(peerId, partial) {
+      const docRef = this.getSignalDocRef(peerId);
+      if (!docRef) {
+        return Promise.resolve();
+      }
+      const payload = Object.assign({}, partial || {});
+      if (this.fieldValue && typeof this.fieldValue.serverTimestamp === 'function') {
+        payload.updatedAt = this.fieldValue.serverTimestamp();
+      }
+      const keys = Object.keys(partial || {});
+      keys.push('updatedAt');
+      this.logSignalWrite(peerId, keys);
+      return docRef.set(payload, { merge: true }).catch((error) => {
+        console.error('[StickFight] writeSignal failed', error);
+      });
+    }
+
+    logSignalWrite(peerId, keys) {
+      if (!this.netdiag) {
+        return;
+      }
+      const payload = {
+        path: this.roomId && peerId ? 'rooms/' + this.roomId + '/signals/' + peerId : null,
+        roomId: this.roomId,
+        peerId,
+        keys,
+      };
+      console.log('[NetDiag] write', payload);
+    }
+
+    hostWatchGuests() {
+      if (!this.isHost || this.playersUnsub) {
+        return;
+      }
+      const roomRef = this.getRoomRef();
+      if (!roomRef || typeof roomRef.collection !== 'function') {
+        return;
+      }
+      const playersRef = roomRef.collection('players');
+      if (!playersRef || typeof playersRef.onSnapshot !== 'function') {
+        return;
+      }
+      this.playersUnsub = playersRef.onSnapshot((snapshot) => {
+        if (!snapshot) {
+          return;
+        }
+        snapshot.docChanges().forEach((change) => {
+          const doc = change.doc;
+          const guestId = doc ? doc.id : null;
+          if (!guestId || guestId === this.peerId) {
+            return;
+          }
+          if (change.type === 'removed') {
+            this.teardownPeer(guestId);
+            return;
+          }
+          this.hostAcceptGuest(guestId);
+        });
+      });
+    }
+
+    teardownPeer(peerId) {
+      const entry = this.peerEntries[peerId];
+      if (!entry) {
+        return;
+      }
+      if (entry.signalUnsub) {
+        entry.signalUnsub();
+        entry.signalUnsub = null;
+      }
+      if (entry.inputDc) {
+        try {
+          entry.inputDc.close();
+        } catch (error) {}
+      }
+      if (entry.stateDc) {
+        try {
+          entry.stateDc.close();
+        } catch (error) {}
+      }
+      if (entry.pc) {
+        try {
+          entry.pc.close();
+        } catch (error) {}
+      }
+      delete this.peerEntries[peerId];
+      if (this.scene && this.scene.net) {
+        delete this.scene.net.pcMap[peerId];
+        delete this.scene.net.dcMap[peerId];
+        if (typeof this.scene.updateNetOverlay === 'function') {
+          this.scene.updateNetOverlay();
+        }
+      }
+    }
+
+    hostAcceptGuest(guestId) {
+      const entry = this.ensurePeerEntry(guestId);
+      let pc = entry.pc;
+      const self = this;
+      if (!pc) {
+        pc = createPeerConnection();
+        entry.pc = pc;
+        this.registerPeerConnection(guestId, pc);
+
+        const inputDc = pc.createDataChannel('input', {
+          ordered: true,
+          maxRetransmits: 0,
+        });
+        const stateDc = pc.createDataChannel('state', { ordered: true });
+        entry.inputDc = inputDc;
+        entry.stateDc = stateDc;
+        this.registerDataChannel(guestId, inputDc, 'input', true);
+        this.registerDataChannel(guestId, stateDc, 'state', true);
+
+        pc.addEventListener('icecandidate', (event) => {
+          if (!event || !event.candidate) {
+            return;
+          }
+          self.appendIce(self.peerId, event.candidate);
+        });
+        pc.addEventListener('connectionstatechange', () => {
+          if (self.scene && typeof self.scene.updateNetOverlay === 'function') {
+            self.scene.updateNetOverlay();
+          }
+          if (pc.connectionState === 'connected') {
+            console.log('host: peer ' + guestId + ' connected');
+          }
+        });
+      }
+
+      if (!entry.signalUnsub) {
+        const guestSignalRef = this.getSignalDocRef(guestId);
+        if (guestSignalRef && typeof guestSignalRef.onSnapshot === 'function') {
+          entry.signalUnsub = guestSignalRef.onSnapshot((doc) => {
+            self.handleGuestSignal(guestId, doc);
+          });
+        }
+      }
+    }
+
+    handleGuestSignal(guestId, doc) {
+      if (!doc || !doc.exists) {
+        return;
+      }
+      const data = doc.data() || {};
+      const entry = this.ensurePeerEntry(guestId);
+      const pc = entry.pc;
+      if (!pc) {
+        return;
+      }
+      if (data.offer) {
+        if (entry.lastOfferSdp !== data.offer.sdp) {
+          entry.offerHandled = false;
+        }
+      }
+      if (data.offer && !entry.offerHandled) {
+        if (this.scene && this.scene.net) {
+          this.scene.net.lastOfferTs = Date.now();
+          if (typeof this.scene.updateNetOverlay === 'function') {
+            this.scene.updateNetOverlay();
+          }
+        }
+        entry.offerHandled = true;
+        entry.lastOfferSdp = data.offer.sdp || null;
+        const description = new RTCSessionDescription(data.offer);
+        pc
+          .setRemoteDescription(description)
+          .then(() => pc.createAnswer())
+          .then((answer) => pc.setLocalDescription(answer))
+          .then(() => {
+            const localDesc = serializeSessionDescription(pc.localDescription);
+            if (localDesc) {
+              if (this.scene && this.scene.net) {
+                this.scene.net.lastAnswerTs = Date.now();
+                entry.lastAnswerSdp = localDesc.sdp;
+              }
+              this.writeSignal(this.peerId, { answer: localDesc });
+              if (this.scene && typeof this.scene.updateNetOverlay === 'function') {
+                this.scene.updateNetOverlay();
+              }
+            }
+          })
+          .catch((error) => {
+            console.error('[StickFight] host answer failed', error);
+            entry.offerHandled = false;
+          });
+      }
+      if (data.ice && data.ice.length) {
+        const list = data.ice;
+        for (let i = entry.remoteIceCount; i < list.length; i += 1) {
+          const ice = list[i];
+          if (!ice || !ice.candidate) {
+            continue;
+          }
+          const candidate = new RTCIceCandidate({
+            candidate: ice.candidate,
+            sdpMid: typeof ice.sdpMid === 'string' ? ice.sdpMid : null,
+            sdpMLineIndex:
+              typeof ice.sdpMLineIndex === 'number' ? ice.sdpMLineIndex : null,
+          });
+          pc
+            .addIceCandidate(candidate)
+            .catch((error) => {
+              console.error('[StickFight] host addIceCandidate failed', error);
+            });
+        }
+        entry.remoteIceCount = list.length;
+      }
+    }
+
+    ensureHostPeerId() {
+      if (this.hostPeerId) {
+        return Promise.resolve(this.hostPeerId);
+      }
+      const roomRef = this.getRoomRef();
+      if (!roomRef || typeof roomRef.get !== 'function') {
+        return Promise.resolve(null);
+      }
+      return roomRef
+        .get()
+        .then((doc) => {
+          if (doc && doc.exists) {
+            const data = doc.data() || {};
+            this.hostPeerId = data.hostPeerId || this.hostPeerId;
+          }
+          return this.hostPeerId;
+        })
+        .catch((error) => {
+          console.error('[StickFight] Failed to fetch room metadata', error);
+          return null;
+        });
+    }
+
+    guestWatchHost() {
+      const ensure = this.ensureHostPeerId();
+      ensure.then((hostPeerId) => {
+        if (!hostPeerId) {
+          return;
+        }
+        this.hostPeerId = hostPeerId;
+        this.watchRoomMetadata();
+        this.ensureGuestPeerConnection();
+        this.subscribeHostSignals();
+      });
+    }
+
+    watchRoomMetadata() {
+      if (this.roomUnsub || !this.getRoomRef()) {
+        return;
+      }
+      const roomRef = this.getRoomRef();
+      if (!roomRef || typeof roomRef.onSnapshot !== 'function') {
+        return;
+      }
+      this.roomUnsub = roomRef.onSnapshot((doc) => {
+        if (!doc || !doc.exists) {
+          return;
+        }
+        const data = doc.data() || {};
+        const hostPeerId = data.hostPeerId;
+        if (hostPeerId && hostPeerId !== this.hostPeerId) {
+          this.hostPeerId = hostPeerId;
+          this.resetGuestConnection();
+        }
+      });
+    }
+
+    resetGuestConnection() {
+      const keys = Object.keys(this.peerEntries);
+      for (let i = 0; i < keys.length; i += 1) {
+        this.teardownPeer(keys[i]);
+      }
+      this.peerEntries = {};
+      this.ensureGuestPeerConnection();
+      this.subscribeHostSignals(true);
+      if (this.scene && typeof this.scene.updateNetOverlay === 'function') {
+        this.scene.updateNetOverlay();
+      }
+    }
+
+    ensureGuestPeerConnection() {
+      const hostPeerId = this.hostPeerId;
+      if (!hostPeerId) {
+        return null;
+      }
+      const entry = this.ensurePeerEntry(hostPeerId);
+      let pc = entry.pc;
+      const self = this;
+      if (!pc) {
+        pc = createPeerConnection();
+        entry.pc = pc;
+        this.registerPeerConnection(hostPeerId, pc);
+
+        const inputDc = pc.createDataChannel('input', {
+          ordered: true,
+          maxRetransmits: 0,
+        });
+        entry.inputDc = inputDc;
+        this.registerDataChannel(hostPeerId, inputDc, 'input', true);
+
+        pc.addEventListener('datachannel', (event) => {
+          const channel = event ? event.channel : null;
+          if (!channel) {
+            return;
+          }
+          if (channel.label === 'state') {
+            entry.stateDc = channel;
+            this.registerDataChannel(hostPeerId, channel, 'state', false);
+          }
+        });
+
+        pc.addEventListener('icecandidate', (event) => {
+          if (!event || !event.candidate) {
+            return;
+          }
+          self.appendIce(self.peerId, event.candidate);
+        });
+        pc.addEventListener('connectionstatechange', () => {
+          if (self.scene && typeof self.scene.updateNetOverlay === 'function') {
+            self.scene.updateNetOverlay();
+          }
+          if (pc.connectionState === 'connected') {
+            console.log('guest: connected to host');
+          }
+        });
+      }
+      return pc;
+    }
+
+    subscribeHostSignals(force) {
+      const hostPeerId = this.hostPeerId;
+      if (!hostPeerId) {
+        return;
+      }
+      if (!force && this.signalUnsubs[hostPeerId]) {
+        return;
+      }
+      const hostSignalRef = this.getSignalDocRef(hostPeerId);
+      if (!hostSignalRef || typeof hostSignalRef.onSnapshot !== 'function') {
+        return;
+      }
+      if (this.signalUnsubs[hostPeerId]) {
+        this.signalUnsubs[hostPeerId]();
+      }
+      this.signalUnsubs[hostPeerId] = hostSignalRef.onSnapshot((doc) => {
+        this.handleHostSignal(doc);
+      });
+    }
+
+    handleHostSignal(doc) {
+      if (!doc || !doc.exists) {
+        return;
+      }
+      const data = doc.data() || {};
+      const hostPeerId = doc.id;
+      const entry = this.ensurePeerEntry(hostPeerId);
+      const pc = entry.pc || this.ensureGuestPeerConnection();
+      if (!pc) {
+        return;
+      }
+      if (data.answer) {
+        if (entry.lastAnswerSdp !== data.answer.sdp) {
+          entry.answerHandled = false;
+        }
+      }
+      if (data.answer && !entry.answerHandled) {
+        entry.answerHandled = true;
+        entry.lastAnswerSdp = data.answer.sdp || null;
+        const description = new RTCSessionDescription(data.answer);
+        pc
+          .setRemoteDescription(description)
+          .then(() => {
+            if (this.scene && this.scene.net) {
+              this.scene.net.lastAnswerTs = Date.now();
+              if (typeof this.scene.updateNetOverlay === 'function') {
+                this.scene.updateNetOverlay();
+              }
+            }
+          })
+          .catch((error) => {
+            console.error('[StickFight] guest setRemoteDescription failed', error);
+            entry.answerHandled = false;
+          });
+      }
+      if (data.ice && data.ice.length) {
+        const list = data.ice;
+        for (let i = entry.remoteIceCount; i < list.length; i += 1) {
+          const ice = list[i];
+          if (!ice || !ice.candidate) {
+            continue;
+          }
+          const candidate = new RTCIceCandidate({
+            candidate: ice.candidate,
+            sdpMid: typeof ice.sdpMid === 'string' ? ice.sdpMid : null,
+            sdpMLineIndex:
+              typeof ice.sdpMLineIndex === 'number' ? ice.sdpMLineIndex : null,
+          });
+          pc
+            .addIceCandidate(candidate)
+            .catch((error) => {
+              console.error('[StickFight] guest addIceCandidate failed', error);
+            });
+        }
+        entry.remoteIceCount = list.length;
+      }
+    }
+
+    guestOffer() {
+      if (this.isHost) {
+        return Promise.resolve();
+      }
+      return this.ensureHostPeerId().then((hostPeerId) => {
+        if (!hostPeerId) {
+          return null;
+        }
+        this.hostPeerId = hostPeerId;
+        const pc = this.ensureGuestPeerConnection();
+        if (!pc) {
+          return null;
+        }
+        const entry = this.ensurePeerEntry(hostPeerId);
+        entry.answerHandled = false;
+        return pc
+          .createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false })
+          .then((offer) => pc.setLocalDescription(offer).then(() => offer))
+          .then((offer) => {
+            const desc = serializeSessionDescription(offer);
+            if (!desc) {
+              return null;
+            }
+            if (this.scene && this.scene.net) {
+              this.scene.net.lastOfferTs = Date.now();
+            }
+            return this.writeSignal(this.peerId, { role: 'guest', offer: desc });
+          })
+          .then(() => {
+            if (this.scene && typeof this.scene.updateNetOverlay === 'function') {
+              this.scene.updateNetOverlay();
+            }
+          })
+          .catch((error) => {
+            console.error('[StickFight] guestOffer failed', error);
+          });
+      });
+    }
+  }
+
   const SPEED = 220;
   const ACCEL = 1200;
   const FRICTION = 1600;
@@ -1180,6 +2071,10 @@
         p1: { up: false, forward: false, back: false },
         p2: { up: false, forward: false, back: false },
       };
+      this._netDiagEnabled = NET_DIAG_ENABLED;
+      this.net = null;
+      this.signaling = null;
+      this.netOverlay = null;
     }
 
     getDefaultJoyDiagModes() {
@@ -1874,9 +2769,262 @@
         }
       };
       this.input.on('pointerdown', pointerDownHandler);
+      this.setupNetworking();
       this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
         this.input.off('pointerdown', pointerDownHandler);
+        this.teardownNetworking();
       });
+    }
+
+    resolveNetSession() {
+      const session = {
+        roomId: null,
+        peerId: null,
+        isHost: false,
+        hostPeerId: null,
+      };
+
+      const win = typeof window !== 'undefined' ? window : null;
+      const possibleSources = [];
+      if (win) {
+        if (win.STICKFIGHT_NET_SESSION) {
+          possibleSources.push(win.STICKFIGHT_NET_SESSION);
+        }
+        if (win.STICKFIGHT_NET) {
+          possibleSources.push(win.STICKFIGHT_NET);
+        }
+        if (win.StickFightNet) {
+          possibleSources.push(win.StickFightNet);
+        }
+      }
+
+      const applySession = (source) => {
+        if (!source) {
+          return;
+        }
+        if (typeof source.roomId === 'string' && source.roomId.length > 0) {
+          session.roomId = session.roomId || source.roomId;
+        }
+        if (typeof source.peerId === 'string' && source.peerId.length > 0) {
+          session.peerId = session.peerId || source.peerId;
+        }
+        if (typeof source.isHost === 'boolean') {
+          session.isHost = source.isHost;
+        }
+        if (typeof source.hostPeerId === 'string' && source.hostPeerId.length > 0) {
+          session.hostPeerId = session.hostPeerId || source.hostPeerId;
+        }
+        if (!session.isHost && typeof source.role === 'string') {
+          session.isHost = source.role === 'host';
+        }
+      };
+
+      for (let i = 0; i < possibleSources.length; i += 1) {
+        applySession(possibleSources[i]);
+      }
+
+      if (!session.roomId && NET_QUERY_PARAMS.room) {
+        session.roomId = NET_QUERY_PARAMS.room;
+      }
+      if (!session.peerId && NET_QUERY_PARAMS.peer) {
+        session.peerId = NET_QUERY_PARAMS.peer;
+      }
+      if (!session.hostPeerId && NET_QUERY_PARAMS.hostPeerId) {
+        session.hostPeerId = NET_QUERY_PARAMS.hostPeerId;
+      }
+      if (!session.isHost && NET_QUERY_PARAMS.role === 'host') {
+        session.isHost = true;
+      }
+      if (!session.isHost && session.peerId && session.hostPeerId && session.peerId === session.hostPeerId) {
+        session.isHost = true;
+      }
+      if (session.isHost && !session.hostPeerId && session.peerId) {
+        session.hostPeerId = session.peerId;
+      }
+
+      return session;
+    }
+
+    createNetState(role) {
+      this.net = {
+        role: role,
+        pcMap: {},
+        dcMap: {},
+        inputDc: null,
+        stateDc: null,
+        rtts: {},
+        lastOfferTs: null,
+        lastAnswerTs: null,
+      };
+    }
+
+    setupNetworking() {
+      const session = this.resolveNetSession();
+      if (!session.roomId || !session.peerId) {
+        if (this._netDiagEnabled) {
+          netDiagLog('setup:skipped', { reason: 'missing session', session });
+        }
+        return;
+      }
+
+      const db = FirebaseRuntime.getFirestore();
+      const fieldValue = FirebaseRuntime.getFieldValue();
+      if (!db || !fieldValue) {
+        if (this._netDiagEnabled) {
+          netDiagLog('setup:firestore-unavailable', { roomId: session.roomId });
+        }
+        return;
+      }
+
+      this.createNetState(session.isHost ? 'host' : 'guest');
+
+      const signaling = new Signaling({
+        db,
+        fieldValue,
+        roomId: session.roomId,
+        peerId: session.peerId,
+        isHost: session.isHost,
+        hostPeerId: session.hostPeerId,
+        scene: this,
+        netdiag: this._netDiagEnabled,
+      });
+
+      this.signaling = signaling;
+      signaling.start();
+      if (session.isHost) {
+        signaling.hostWatchGuests();
+      } else {
+        signaling.guestWatchHost();
+        signaling.guestOffer();
+      }
+      this.createNetOverlay();
+      this.updateNetOverlay();
+    }
+
+    teardownNetworking() {
+      if (this.signaling) {
+        this.signaling.stop();
+        this.signaling = null;
+      }
+      if (this.netOverlay) {
+        this.netOverlay.setText('');
+        this.netOverlay.setVisible(false);
+      }
+      if (this.net) {
+        this.net.pcMap = {};
+        this.net.dcMap = {};
+        this.net.inputDc = null;
+        this.net.stateDc = null;
+        this.net.rtts = {};
+        this.net.lastOfferTs = null;
+        this.net.lastAnswerTs = null;
+      }
+      this.net = null;
+      this.updateNetOverlay();
+    }
+
+    createNetOverlay() {
+      if (!this._netDiagEnabled) {
+        return;
+      }
+      if (this.netOverlay) {
+        return;
+      }
+      if (!this.add || typeof this.add.text !== 'function') {
+        return;
+      }
+      const text = this.add
+        .text(0, 0, '', {
+          fontFamily: 'Menlo, Monaco, Consolas, monospace',
+          fontSize: '12px',
+          color: '#66ffcc',
+          align: 'right',
+          backgroundColor: 'rgba(5, 25, 18, 0.6)',
+        })
+        .setOrigin(1, 0)
+        .setScrollFactor(0)
+        .setDepth(120)
+        .setVisible(false);
+      text.setPadding(8, 6, 10, 8);
+      this.netOverlay = text;
+      this.positionNetOverlay();
+    }
+
+    positionNetOverlay() {
+      if (!this.netOverlay) {
+        return;
+      }
+      const safeInsets = this.safeAreaInsets || {};
+      const topInset = typeof safeInsets.top === 'number' ? safeInsets.top : 0;
+      const rightInset = typeof safeInsets.right === 'number' ? safeInsets.right : 0;
+      const topOffset = topInset + 12;
+      const rightOffset = rightInset + 12;
+      const size = this.scale ? this.scale.gameSize : null;
+      const width = size ? size.width : 0;
+      this.netOverlay.setPosition(width - rightOffset, topOffset);
+    }
+
+    formatNetTimestamp(ts) {
+      if (!ts) {
+        return '-';
+      }
+      try {
+        const date = new Date(ts);
+        return date.toLocaleTimeString();
+      } catch (error) {
+        return String(ts);
+      }
+    }
+
+    getNetPeerCounts() {
+      const counts = { total: 0, connected: 0 };
+      if (!this.net || !this.net.pcMap) {
+        return counts;
+      }
+      const keys = Object.keys(this.net.pcMap);
+      counts.total = keys.length;
+      for (let i = 0; i < keys.length; i += 1) {
+        const peerId = keys[i];
+        const pc = this.net.pcMap[peerId];
+        if (!pc) {
+          continue;
+        }
+        const connectionState = typeof pc.connectionState === 'string' ? pc.connectionState : '';
+        const iceState = typeof pc.iceConnectionState === 'string' ? pc.iceConnectionState : '';
+        if (connectionState === 'connected' || iceState === 'connected' || iceState === 'completed') {
+          counts.connected += 1;
+        }
+      }
+      return counts;
+    }
+
+    updateNetOverlay() {
+      if (!this._netDiagEnabled) {
+        if (this.netOverlay) {
+          this.netOverlay.setText('');
+          this.netOverlay.setVisible(false);
+        }
+        return;
+      }
+      this.createNetOverlay();
+      if (!this.netOverlay) {
+        return;
+      }
+      if (!this.net) {
+        this.netOverlay.setText('role: offline');
+        this.netOverlay.setVisible(true);
+        return;
+      }
+      const counts = this.getNetPeerCounts();
+      const roleLabel = this.net.role || (this.signaling && this.signaling.isHost ? 'host' : 'guest');
+      const lines = [
+        'role: ' + roleLabel,
+        'peers: ' + counts.connected + '/' + counts.total,
+        'offer: ' + this.formatNetTimestamp(this.net.lastOfferTs),
+        'answer: ' + this.formatNetTimestamp(this.net.lastAnswerTs),
+      ];
+      this.netOverlay.setText(lines.join('\n'));
+      this.netOverlay.setVisible(true);
     }
 
     waitForValidSize(callback) {
@@ -2256,6 +3404,7 @@
       (this._centeredElements || []).forEach((updatePosition) => updatePosition());
       this.positionTouchButtons();
       this.positionDebugOverlay();
+      this.positionNetOverlay();
 
       if (this._layoutReady) {
         this.refreshWorldBounds(size);
@@ -2327,6 +3476,7 @@
       }
 
       this.updateDebugOverlay();
+      this.updateNetOverlay();
       traceControls(this);
 
       if (this._joyDiagFrameState) {
