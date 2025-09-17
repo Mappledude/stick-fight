@@ -73,6 +73,10 @@
       this.vector = new Phaser.Math.Vector2(0, 0);
       this.magnitude = 0;
       this.enabled = true;
+      this.synthetic = {
+        active: false,
+        vector: new Phaser.Math.Vector2(0, 0),
+      };
 
       this.setScrollFactor(0);
       this.setSize((this.radius + this.hitPadding) * 2, (this.radius + this.hitPadding) * 2);
@@ -140,13 +144,17 @@
     }
 
     isActive() {
-      return this.pointerId !== null && this.magnitude > this.deadzone;
+      if (this.magnitude <= this.deadzone) {
+        return false;
+      }
+      return this.pointerId !== null || this.synthetic.active;
     }
 
     handlePointerDown(pointer) {
       if (!this.enabled) {
         return;
       }
+      this.synthetic.active = false;
       const pointerId = this.getPointerId(pointer);
       if (this.pointerId !== null && this.pointerId !== pointerId) {
         return;
@@ -163,6 +171,7 @@
       if (!this.enabled) {
         return;
       }
+      this.synthetic.active = false;
       const pointerId = this.getPointerId(pointer);
       if (this.pointerId !== pointerId) {
         return;
@@ -211,12 +220,15 @@
         Phaser.Math.Clamp(knobX / this.radius, -1, 1),
         Phaser.Math.Clamp(knobY / this.radius, -1, 1)
       );
+      this.synthetic.active = false;
     }
 
     reset() {
       this.pointerId = null;
       this.vector.set(0, 0);
       this.magnitude = 0;
+      this.synthetic.active = false;
+      this.synthetic.vector.set(0, 0);
       if (this.knob) {
         this.knob.setPosition(0, 0);
       }
@@ -224,6 +236,41 @@
 
     getVector() {
       return { x: this.vector.x, y: this.vector.y, magnitude: this.magnitude };
+    }
+
+    setSyntheticInput(x, y) {
+      if (!this.enabled || this.pointerId !== null) {
+        return;
+      }
+      const clampedX = Phaser.Math.Clamp(x, -1, 1);
+      const clampedY = Phaser.Math.Clamp(y, -1, 1);
+      this.synthetic.active = true;
+      this.synthetic.vector.set(clampedX, clampedY);
+
+      const magnitude = Phaser.Math.Clamp(
+        Math.sqrt(clampedX * clampedX + clampedY * clampedY),
+        0,
+        1
+      );
+      this.magnitude = magnitude;
+      this.vector.set(clampedX, clampedY);
+
+      if (this.knob) {
+        this.knob.setPosition(this.vector.x * this.radius, this.vector.y * this.radius);
+      }
+    }
+
+    clearSyntheticInput() {
+      if (!this.synthetic.active || this.pointerId !== null) {
+        return;
+      }
+      this.synthetic.active = false;
+      this.synthetic.vector.set(0, 0);
+      this.vector.set(0, 0);
+      this.magnitude = 0;
+      if (this.knob) {
+        this.knob.setPosition(0, 0);
+      }
     }
   }
 
@@ -390,6 +437,13 @@
 
       this._forceJoystick = false;
       this._forceKeyboard = false;
+      this._joyDiagEnabled = false;
+      this._joyTestEnabled = false;
+      this._joyDiagVelocityElapsed = 0;
+      this._joyTestElapsed = 0;
+      this._joyTestDirection = 1;
+      this._joyTestInterval = 1.2;
+      this._joyTestNeedsLog = true;
 
       const parseDebugFlag = (value) => {
         if (typeof value !== 'string') {
@@ -404,11 +458,19 @@
           const params = new URLSearchParams(win.location.search);
           this._forceJoystick = parseDebugFlag(params.get('forceJoystick'));
           this._forceKeyboard = parseDebugFlag(params.get('forceKeyboard'));
+          this._joyDiagEnabled = parseDebugFlag(params.get('joydiag'));
+          this._joyTestEnabled = parseDebugFlag(params.get('joytest'));
         } else {
           const searchLower = win.location.search.toLowerCase();
           this._forceJoystick = /[?&]forcejoystick=(1|true|yes|on)\b/.test(searchLower);
           this._forceKeyboard = /[?&]forcekeyboard=(1|true|yes|on)\b/.test(searchLower);
+          this._joyDiagEnabled = /[?&]joydiag=(1|true|yes|on)\b/.test(searchLower);
+          this._joyTestEnabled = /[?&]joytest=(1|true|yes|on)\b/.test(searchLower);
         }
+      }
+
+      if (!this._joyDiagEnabled) {
+        this._joyTestEnabled = false;
       }
 
       const phaserTouchDevice =
@@ -717,21 +779,100 @@
 
     update(time, delta) {
       this.dt = Math.min(delta, 50) / 1000;
+      if (this._joyDiagEnabled && this._joyTestEnabled) {
+        this.runJoyTestSimulation(this.dt);
+      } else {
+        this.clearJoyTestSimulation();
+      }
       this.reconcileInputState();
 
       if (this._fighters && this._fighters.length) {
         const [p1, p2] = this._fighters;
         if (p1) {
+          if (this._joyDiagEnabled) {
+            console.log('[joydiag] p1 input', {
+              moveX: this.p1Input.moveX,
+              crouch: this.p1Input.crouch,
+              jumpUp: this.p1Input.jumpUp,
+              jumpForward: this.p1Input.jumpForward,
+              jumpBack: this.p1Input.jumpBack,
+            });
+          }
           this.updateFighterMovement(p1, this.p1Input, p2, this.dt);
         }
         if (p2) {
+          if (this._joyDiagEnabled) {
+            console.log('[joydiag] p2 input', {
+              moveX: this.p2Input.moveX,
+              crouch: this.p2Input.crouch,
+              jumpUp: this.p2Input.jumpUp,
+              jumpForward: this.p2Input.jumpForward,
+              jumpBack: this.p2Input.jumpBack,
+            });
+          }
           this.updateFighterMovement(p2, this.p2Input, p1, this.dt);
+        }
+      }
+
+      if (this._joyDiagEnabled) {
+        this._joyDiagVelocityElapsed += this.dt;
+        if (this._joyDiagVelocityElapsed >= 1) {
+          this._joyDiagVelocityElapsed -= 1;
+          this._fighters.forEach((fighter, index) => {
+            if (!fighter || !fighter.body || !fighter.body.velocity) {
+              return;
+            }
+            console.log(`[joydiag] fighter${index + 1} velocity`, {
+              x: fighter.body.velocity.x,
+              y: fighter.body.velocity.y,
+            });
+          });
         }
       }
 
       this._fighters.forEach((fighter) => fighter.update(this.dt));
       this.resetMomentaryInputFlags();
       this.updateDebugOverlay();
+    }
+
+    runJoyTestSimulation(dt) {
+      const interval = Math.max(this._joyTestInterval, 0.1);
+      this._joyTestElapsed += dt;
+
+      if (this._joyTestNeedsLog) {
+        console.log('[joytest] synthetic joystick direction: right (initial)');
+        this._joyTestNeedsLog = false;
+      }
+
+      while (this._joyTestElapsed >= interval) {
+        this._joyTestElapsed -= interval;
+        this._joyTestDirection *= -1;
+        const directionLabel = this._joyTestDirection > 0 ? 'right' : 'left';
+        console.log(`[joytest] synthetic joystick direction: ${directionLabel}`);
+      }
+
+      const vectorX = 0.85 * this._joyTestDirection;
+      const vectorY = 0;
+      ['p1', 'p2'].forEach((player) => {
+        const joystick = this.virtualJoysticks[player];
+        if (joystick && typeof joystick.setSyntheticInput === 'function') {
+          joystick.setSyntheticInput(vectorX, vectorY);
+        }
+      });
+    }
+
+    clearJoyTestSimulation() {
+      this._joyTestElapsed = 0;
+      this._joyTestDirection = 1;
+      if (!this._joyTestNeedsLog) {
+        this._joyTestNeedsLog = true;
+      }
+      ['p1', 'p2'].forEach((player) => {
+        const joystick = this.virtualJoysticks[player];
+        if (joystick && typeof joystick.clearSyntheticInput === 'function') {
+          joystick.clearSyntheticInput();
+        }
+      });
     }
 
     reconcileInputState() {
