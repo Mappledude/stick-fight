@@ -823,45 +823,58 @@ runtime.tick = runtime.hostTick;
   }
 
   function buildStateSnapshot() {
-    if (!runtime.scene || typeof runtime.scene.getFighterSnapshots !== 'function') {
+    const registry = runtime.registry;
+    if (!registry || typeof registry.getPlayers !== 'function') {
       return { players: [], play: null };
     }
-    const fighters = runtime.scene.getFighterSnapshots();
-    const playArea = runtime.scene.playArea || null;
-    const players = Array.isArray(fighters)
-      ? fighters
-          .map((fighter) => {
-            if (!fighter || !fighter.slot) {
+
+    const players = registry.getPlayers();
+    const sanitizedPlayers = Array.isArray(players)
+      ? players
+          .map((player) => {
+            if (!player || typeof player !== 'object') {
               return null;
             }
-            const peerId = runtime.slotAssignments[fighter.slot];
-            if (!peerId) {
+            const id = typeof player.id === 'string' ? player.id : null;
+            if (!id) {
               return null;
             }
+            const slot = typeof player.slot === 'string' && player.slot ? player.slot : getSlotForPeer(id);
             return {
-              id: peerId,
-              slot: fighter.slot,
-              name: getPlayerName(peerId),
-              x: Number.isFinite(fighter.x) ? fighter.x : 0,
-              y: Number.isFinite(fighter.y) ? fighter.y : 0,
-              vx: Number.isFinite(fighter.vx) ? fighter.vx : 0,
-              vy: Number.isFinite(fighter.vy) ? fighter.vy : 0,
-              hp: Number.isFinite(fighter.hp) ? fighter.hp : 100,
-              facing: fighter.facing === -1 ? -1 : 1,
-              onGround: !!fighter.onGround,
+              id,
+              slot: typeof slot === 'string' ? slot : null,
+              name: typeof player.name === 'string' ? player.name : getPlayerName(id),
+              x: Number.isFinite(player.x) ? player.x : 0,
+              y: Number.isFinite(player.y) ? player.y : 0,
+              vx: Number.isFinite(player.vx) ? player.vx : 0,
+              vy: Number.isFinite(player.vy) ? player.vy : 0,
+              hp: Number.isFinite(player.hp) ? player.hp : 100,
+              facing: player.facing === -1 ? -1 : 1,
+              onGround: !!player.onGround,
             };
           })
           .filter(Boolean)
       : [];
-    const play = playArea
+
+    const playRect = registry.playRect;
+    const play = playRect && typeof playRect === 'object'
       ? {
-          x: Number.isFinite(playArea.x) ? playArea.x : 0,
-          y: Number.isFinite(playArea.y) ? playArea.y : 0,
-          w: Number.isFinite(playArea.w) ? playArea.w : 0,
-          h: Number.isFinite(playArea.h) ? playArea.h : 0,
+          x: Number.isFinite(playRect.x) ? playRect.x : 0,
+          y: Number.isFinite(playRect.y) ? playRect.y : 0,
+          w: Number.isFinite(playRect.width) ? playRect.width : 0,
+          h: Number.isFinite(playRect.height) ? playRect.height : 0,
         }
       : null;
-    return { players, play, tick: runtime.tick };
+// unified return (sanitized players + tick info)
+const hostTick = ((runtime.hostTick ?? runtime.tick ?? 0) >>> 0);
+return {
+  players: sanitizedPlayers,   // do not leak internal fields
+  play,
+  // clocks
+  hostTick,                    // canonical authoritative tick
+  tick: hostTick               // back-compat for older readers
+};
+
   }
 
   function broadcastHostState() {
