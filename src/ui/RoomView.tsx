@@ -4,6 +4,7 @@ import { claimPlayer, ERR_DEVICE_MISMATCH, HeartbeatHandle } from '../net/player
 import { setLocalContext, clearLocalContext } from '../net/send';
 import { startConsuming, stopConsuming } from '../net/consume';
 import { getDeviceId } from '../lib/identity';
+import { debugWarn } from '../lib/debug';
 
 type RoomViewProps = {
   roomId: string;
@@ -17,11 +18,12 @@ type ClaimState = {
   heartbeat: HeartbeatHandle;
 };
 
-type ViewState = 'loading' | 'ready' | 'blocked' | 'error';
+type ViewState = 'loading' | 'ready' | 'blocked' | 'error' | 'auth-error';
 
 export default function RoomView({ roomId, nick, children }: RoomViewProps) {
   const [state, setState] = useState<ViewState>('loading');
   const [error, setError] = useState<Error | null>(null);
+  const [authError, setAuthError] = useState<{ code?: string; message?: string } | null>(null);
   const [claim, setClaim] = useState<ClaimState | null>(null);
 
   useEffect(() => {
@@ -31,6 +33,7 @@ export default function RoomView({ roomId, nick, children }: RoomViewProps) {
     setState('loading');
     setError(null);
     setClaim(null);
+    setAuthError(null);
 
     claimPlayer(roomId, nick)
       .then((result) => {
@@ -51,10 +54,17 @@ export default function RoomView({ roomId, nick, children }: RoomViewProps) {
         if (err && (err.message === ERR_DEVICE_MISMATCH || err.code === ERR_DEVICE_MISMATCH)) {
           const deviceId = getDeviceId();
           const uid = err.uid || (err as any).uid || 'unknown';
-          if (typeof console !== 'undefined' && console && typeof console.warn === 'function') {
-            console.warn(`[INPUT][BLOCK] device-mismatch uid=${uid} deviceId=${deviceId}`);
-          }
+          debugWarn(`[INPUT][BLOCK] device-mismatch uid=${uid} deviceId=${deviceId}`);
           setState('blocked');
+        } else if (err && typeof err.code === 'string' && err.code.startsWith('auth/')) {
+          const message =
+            typeof err.message === 'string'
+              ? err.message
+              : err && typeof (err as any).message !== 'undefined'
+                ? String((err as any).message)
+                : String(err);
+          setAuthError({ code: err.code, message });
+          setState('auth-error');
         } else {
           setState('error');
           setError(err);
@@ -85,6 +95,37 @@ export default function RoomView({ roomId, nick, children }: RoomViewProps) {
         <div className="modal">
           <h2>Device Claimed</h2>
           <p>This player is claimed on another device. Leave room or sign in on that device.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (state === 'auth-error') {
+    const code = authError?.code || 'auth/unknown';
+    const message = authError?.message || 'Authentication failed. Please try again later.';
+    return (
+      <div className="room-view auth-error">
+        <div
+          className="error-banner"
+          style={{
+            backgroundColor: '#b00020',
+            color: '#fff',
+            padding: '12px 16px',
+            borderRadius: '4px',
+            margin: '24px auto',
+            maxWidth: '420px',
+            boxShadow: '0 2px 6px rgba(0, 0, 0, 0.2)',
+          }}
+        >
+          <strong style={{ display: 'block', marginBottom: '8px' }}>Firebase authentication failed</strong>
+          <div style={{ fontSize: '14px', lineHeight: 1.4 }}>
+            <div>
+              <span style={{ fontWeight: 600 }}>Code:</span> {code}
+            </div>
+            <div>
+              <span style={{ fontWeight: 600 }}>Message:</span> {message}
+            </div>
+          </div>
         </div>
       </div>
     );
