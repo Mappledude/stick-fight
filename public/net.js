@@ -13,6 +13,18 @@
     shareUrl: null,
   };
 
+  const overlayState = {
+    overlay: null,
+    panel: null,
+    isAdmin: false,
+  };
+
+  const lobbyRoomsState = {
+    rooms: [],
+    unsubscribe: null,
+    listening: false,
+  };
+
   const firebaseNamespace = () => (typeof global.firebase !== 'undefined' ? global.firebase : null);
 
   const getFirebaseConfig = () => {
@@ -224,9 +236,62 @@ function ensureAuthReady() {
     });
   };
 
+  const logMessage = (label, message, data) => {
+    if (typeof console === 'undefined' || !console || typeof console.log !== 'function') {
+      return;
+    }
+    if (data !== undefined) {
+      console.log(`${label} ${message}`, data);
+      return;
+    }
+    console.log(`${label} ${message}`);
+  };
+
+  const createRoomRecord = async ({ hostUid, hostName }) => {
+    const firestore = ensureFirestore();
+    const resolvedName = hostName && hostName.trim() ? hostName.trim() : 'Host';
+    const roomId = generateRoomId();
+    const hostPeerId = generatePeerId();
+    const roomsCollection = firestore.collection('rooms');
+    const roomRef = roomsCollection.doc(roomId);
+    const playersRef = roomRef.collection('players').doc(hostUid);
+    const now = getTimestampValue();
+    await runTransaction(async (transaction) => {
+      const existing = await transaction.get(roomRef);
+      if (existing && existing.exists) {
+        throw new Error('A room with this ID already exists. Please try again.');
+      }
+      transaction.set(roomRef, {
+        code: roomId,
+        active: true,
+        status: 'open',
+        createdAt: now,
+        updatedAt: now,
+        lastActivityAt: now,
+        maxPlayers: 9,
+        hostPeerId,
+        hostUid,
+        playerCount: 1,
+      });
+      transaction.set(playersRef, {
+        uid: hostUid,
+        peerId: hostPeerId,
+        name: resolvedName,
+        joinedAt: now,
+        isHost: true,
+      });
+    });
+    logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`);
+    return {
+      roomId,
+      hostPeerId,
+      hostUid,
+      hostName: resolvedName,
+    };
+  };
+
   const createRoom = async (options) => {
     await ensureAuthReady();
-    const firestore = ensureFirestore();
     const { auth, user } = await ensureSignedInUser();
     const currentUser = user || (auth && auth.currentUser);
     if (!currentUser || !currentUser.uid) {
@@ -234,30 +299,8 @@ function ensureAuthReady() {
     }
     const hostName = typeof options === 'string' ? options : options && options.name;
     const resolvedHostName = hostName && hostName.trim() ? hostName.trim() : 'Host';
-    const roomId = generateRoomId();
-    const hostPeerId = generatePeerId();
-    const roomsCollection = firestore.collection('rooms');
-    const roomRef = roomsCollection.doc(roomId);
-    const playersRef = roomRef.collection('players').doc(currentUser.uid);
-
-    await runTransaction(async (transaction) => {
-      const existing = await transaction.get(roomRef);
-      if (existing && existing.exists) {
-        throw new Error('A room with this ID already exists. Please try again.');
-      }
-      transaction.set(roomRef, {
-        createdAt: getTimestampValue(),
-        maxPlayers: 9,
-        hostPeerId,
-      });
-      transaction.set(playersRef, {
-        uid: currentUser.uid,
-        peerId: hostPeerId,
-        name: resolvedHostName,
-        joinedAt: getTimestampValue(),
-        isHost: true,
-      });
-    });
+    const record = await createRoomRecord({ hostUid: currentUser.uid, hostName: resolvedHostName });
+    const { roomId, hostPeerId } = record;
 
     const shareUrl = buildShareUrl(roomId);
     netState.roomId = roomId;
@@ -294,6 +337,12 @@ function ensureAuthReady() {
     const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
     const peerId = generatePeerId();
     const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
+    const playersCollection = roomRef.collection('players');
+    const [existingPlayerDoc, playersSnapshot] = await Promise.all([
+      playerDocRef.get(),
+      playersCollection.get(),
+    ]);
+    const alreadyPresent = !!(existingPlayerDoc && existingPlayerDoc.exists);
 
     await runTransaction(async (transaction) => {
       const roomSnapshot = await transaction.get(roomRef);
@@ -302,20 +351,30 @@ function ensureAuthReady() {
       }
       const roomData = roomSnapshot.data() || {};
       const maxPlayers = typeof roomData.maxPlayers === 'number' ? roomData.maxPlayers : 9;
-      const playersCollection = roomRef.collection('players');
-      const playersSnapshot = await transaction.get(playersCollection);
-      const existingPlayerDoc = await transaction.get(playerDocRef);
-      const alreadyPresent = existingPlayerDoc && existingPlayerDoc.exists;
       if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
         throw new Error('This room is already full.');
       }
+      const now = getTimestampValue();
       transaction.set(playerDocRef, {
         uid: currentUser.uid,
         peerId,
         name: resolvedName,
-        joinedAt: getTimestampValue(),
+        joinedAt: now,
         isHost: false,
       });
+      const updates = {
+        updatedAt: now,
+        lastActivityAt: now,
+      };
+      if (!alreadyPresent) {
+        if (netState.fieldValue && typeof netState.fieldValue.increment === 'function') {
+          updates.playerCount = netState.fieldValue.increment(1);
+        } else {
+          const currentCount = typeof roomData.playerCount === 'number' ? roomData.playerCount : playersSnapshot.size;
+          updates.playerCount = currentCount + 1;
+        }
+      }
+      transaction.update(roomRef, updates);
     });
 
     netState.roomId = trimmedRoomId;
@@ -324,6 +383,8 @@ function ensureAuthReady() {
     netState.playerName = resolvedName;
     netState.shareUrl = buildShareUrl(trimmedRoomId);
     netState.initialized = true;
+
+    logMessage('[ROOM]', `joined code=${trimmedRoomId} uid=${currentUser.uid} name=${resolvedName}${alreadyPresent ? ' (rejoin)' : ''}`);
 
     emitEvent('roomJoined', {
       roomId: trimmedRoomId,
@@ -334,9 +395,322 @@ function ensureAuthReady() {
     return { roomId: trimmedRoomId, peerId, name: resolvedName };
   };
 
-  const overlayState = {
-    overlay: null,
-    panel: null,
+  const deleteCollectionDocs = async (collectionRef, batchSize = 50) => {
+    const firestore = ensureFirestore();
+    let snapshot = await collectionRef.limit(batchSize).get();
+    while (snapshot && !snapshot.empty) {
+      const batch = firestore.batch();
+      snapshot.docs.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+      await batch.commit();
+      snapshot = await collectionRef.limit(batchSize).get();
+    }
+  };
+
+  const deleteRoomDocument = async (roomRef) => {
+    const subcollections = ['players', 'signals'];
+    for (let i = 0; i < subcollections.length; i += 1) {
+      const sub = subcollections[i];
+      try {
+        const subRef = roomRef.collection(sub);
+        await deleteCollectionDocs(subRef);
+      } catch (error) {
+        logMessage('[ROOM]', `failed to delete ${sub} for code=${roomRef.id}`, error);
+      }
+    }
+    await roomRef.delete();
+    logMessage('[ROOM]', `deleted code=${roomRef.id}`);
+  };
+
+  const adminCreateRoom = async () => {
+    const { auth, user } = await ensureSignedInUser();
+    const currentUser = user || (auth && auth.currentUser);
+    if (!currentUser || !currentUser.uid) {
+      throw new Error('Unable to determine the authenticated user.');
+    }
+    const record = await createRoomRecord({ hostUid: currentUser.uid, hostName: 'Admin' });
+    return {
+      roomId: record.roomId,
+      hostPeerId: record.hostPeerId,
+      shareUrl: buildShareUrl(record.roomId),
+    };
+  };
+
+  const adminDeleteRoomByCode = async (code) => {
+    const trimmed = sanitizeRoomId(code);
+    if (!trimmed) {
+      throw new Error('Room code is required.');
+    }
+    const firestore = ensureFirestore();
+    const roomRef = firestore.collection('rooms').doc(trimmed);
+    const snapshot = await roomRef.get();
+    if (!snapshot.exists) {
+      throw new Error('Room not found.');
+    }
+    await deleteRoomDocument(roomRef);
+    return trimmed;
+  };
+
+  const adminDeleteAllRooms = async () => {
+    const firestore = ensureFirestore();
+    const roomsSnapshot = await firestore.collection('rooms').get();
+    const docs = roomsSnapshot.docs || [];
+    for (let i = 0; i < docs.length; i += 1) {
+      await deleteRoomDocument(docs[i].ref);
+    }
+    return docs.length;
+  };
+
+  const roomsSectionMarkup = (includeAdminButton = true) => `
+      <div class="stickfight-rooms-section">
+        <div class="stickfight-rooms-header">
+          <h3>Open Lobbies</h3>
+          ${includeAdminButton
+            ? '<button type="button" class="stickfight-secondary-button" id="stickfight-admin-entry">Admin</button>'
+            : ''}
+        </div>
+        <div id="stickfight-rooms-table"></div>
+      </div>
+    `;
+
+  const renderRoomsTableMarkup = () => {
+    if (!lobbyRoomsState.rooms || lobbyRoomsState.rooms.length === 0) {
+      return '<p class="stickfight-empty">No open rooms.</p>';
+    }
+    const rows = lobbyRoomsState.rooms
+      .slice()
+      .sort((a, b) => a.code.localeCompare(b.code))
+      .map((room) => {
+        const maxPlayers = typeof room.maxPlayers === 'number' && room.maxPlayers > 0 ? room.maxPlayers : null;
+        const countText = maxPlayers ? `${room.playerCount}/${maxPlayers}` : `${room.playerCount}`;
+        return `
+          <tr>
+            <td>${escapeHtml(room.code)}</td>
+            <td>${escapeHtml(String(countText))}</td>
+          </tr>
+        `;
+      })
+      .join('');
+    return `
+      <table class="stickfight-rooms-table">
+        <thead>
+          <tr>
+            <th>Code</th>
+            <th>Players</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows}
+        </tbody>
+      </table>
+    `;
+  };
+
+  const updateRoomsTable = () => {
+    if (!overlayState.panel) {
+      return;
+    }
+    const container = overlayState.panel.querySelector('#stickfight-rooms-table');
+    if (!container) {
+      return;
+    }
+    container.innerHTML = renderRoomsTableMarkup();
+  };
+
+  const refreshRoomsFromSnapshot = async (snapshot) => {
+    const docs = snapshot && snapshot.docs ? snapshot.docs : [];
+    const processed = await Promise.all(
+      docs.map(async (doc) => {
+        const data = doc.data ? doc.data() || {} : {};
+        let playerCount = typeof data.playerCount === 'number' ? data.playerCount : null;
+        let maxPlayers = typeof data.maxPlayers === 'number' ? data.maxPlayers : null;
+        if (playerCount === null) {
+          try {
+            const playersSnapshot = await doc.ref.collection('players').get();
+            playerCount = playersSnapshot.size;
+          } catch (error) {
+            playerCount = 0;
+          }
+        }
+        if (maxPlayers === null) {
+          maxPlayers = 0;
+        }
+        return {
+          code: doc.id,
+          playerCount,
+          maxPlayers: maxPlayers || undefined,
+        };
+      })
+    );
+    lobbyRoomsState.rooms = processed;
+    updateRoomsTable();
+    logMessage('[LOBBY]', `rooms=${processed.length}`);
+  };
+
+  const startLobbyRoomsListener = async () => {
+    if (lobbyRoomsState.listening) {
+      return;
+    }
+    lobbyRoomsState.listening = true;
+    try {
+      await ensureAuthReady();
+    } catch (error) {
+      logMessage('[LOBBY]', 'failed to initialize auth for lobby rooms', error);
+      return;
+    }
+    const firestore = ensureFirestore();
+    try {
+      const query = firestore
+        .collection('rooms')
+        .where('status', '==', 'open')
+        .where('active', '==', true);
+      lobbyRoomsState.unsubscribe = query.onSnapshot(
+        (snapshot) => {
+          Promise.resolve()
+            .then(() => refreshRoomsFromSnapshot(snapshot))
+            .catch((error) => {
+              logMessage('[LOBBY]', 'failed to process rooms snapshot', error);
+            });
+        },
+        (error) => {
+          logMessage('[LOBBY]', 'rooms snapshot error', error);
+        }
+      );
+    } catch (error) {
+      logMessage('[LOBBY]', 'unable to listen for rooms', error);
+    }
+  };
+
+  const handleAdminEntry = () => {
+    if (overlayState.isAdmin) {
+      renderAdminPanel();
+      return;
+    }
+    const promptFn = typeof window !== 'undefined' && typeof window.prompt === 'function' ? window.prompt : null;
+    const code = promptFn ? promptFn('Enter admin code') : null;
+    if (code === '808080') {
+      overlayState.isAdmin = true;
+      logMessage('[ADMIN]', 'entered');
+      renderAdminPanel();
+    } else if (code && code.trim()) {
+      const alertFn = typeof window !== 'undefined' && typeof window.alert === 'function' ? window.alert : null;
+      if (alertFn) {
+        alertFn('Invalid admin code.');
+      }
+    }
+  };
+
+  const attachAdminEntryHandler = () => {
+    if (!overlayState.panel) {
+      return;
+    }
+    const adminButton = overlayState.panel.querySelector('#stickfight-admin-entry');
+    if (!adminButton) {
+      return;
+    }
+    adminButton.addEventListener('click', handleAdminEntry);
+  };
+
+  const renderAdminPanel = () => {
+    showOverlay();
+    renderContent(`
+      <h2>Admin Controls</h2>
+      <p>Manage rooms for debugging and moderation. Be careful—deletions are permanent.</p>
+      <div class="stickfight-admin-grid">
+        <button type="button" class="stickfight-primary-button" id="stickfight-admin-create-room">Create Open Room</button>
+        <form class="stickfight-admin-inline" id="stickfight-admin-delete-form">
+          <input type="text" id="stickfight-admin-delete-code" name="code" placeholder="Room code" autocomplete="off" />
+          <button type="submit" class="stickfight-secondary-button">Delete by Code</button>
+        </form>
+        <form class="stickfight-admin-inline" id="stickfight-admin-delete-all-form">
+          <input type="text" id="stickfight-admin-delete-all-confirm" name="confirm" placeholder="Type DELETE ALL" autocomplete="off" />
+          <button type="submit" class="stickfight-secondary-button">Delete All Rooms</button>
+        </form>
+        <div class="stickfight-admin-status" id="stickfight-admin-status"></div>
+        <div style="display: flex; justify-content: flex-end; gap: 12px;">
+          <button type="button" class="stickfight-secondary-button" id="stickfight-admin-back">Back</button>
+        </div>
+      </div>
+      ${roomsSectionMarkup(false)}
+    `);
+
+    const statusEl = overlayState.panel.querySelector('#stickfight-admin-status');
+    const setStatus = (message) => {
+      if (statusEl) {
+        statusEl.textContent = message || '';
+      }
+    };
+
+    const createButton = overlayState.panel.querySelector('#stickfight-admin-create-room');
+    if (createButton) {
+      createButton.addEventListener('click', async () => {
+        createButton.disabled = true;
+        setStatus('Creating room...');
+        try {
+          const record = await adminCreateRoom();
+          setStatus(`Room ${record.roomId} created.`);
+        } catch (error) {
+          const message = error && error.message ? error.message : 'Failed to create room.';
+          setStatus(message);
+        } finally {
+          createButton.disabled = false;
+        }
+      });
+    }
+
+    const deleteForm = overlayState.panel.querySelector('#stickfight-admin-delete-form');
+    if (deleteForm) {
+      deleteForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const input = overlayState.panel.querySelector('#stickfight-admin-delete-code');
+        const code = input && input.value ? input.value.trim() : '';
+        setStatus('Deleting room...');
+        try {
+          const deletedCode = await adminDeleteRoomByCode(code);
+          setStatus(`Room ${deletedCode} deleted.`);
+          if (input) {
+            input.value = '';
+          }
+        } catch (error) {
+          const message = error && error.message ? error.message : 'Failed to delete room.';
+          setStatus(message);
+        }
+      });
+    }
+
+    const deleteAllForm = overlayState.panel.querySelector('#stickfight-admin-delete-all-form');
+    if (deleteAllForm) {
+      deleteAllForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const confirmInput = overlayState.panel.querySelector('#stickfight-admin-delete-all-confirm');
+        const confirmValue = confirmInput && confirmInput.value ? confirmInput.value.trim() : '';
+        if (confirmValue !== 'DELETE ALL') {
+          setStatus('Type DELETE ALL to confirm.');
+          return;
+        }
+        setStatus('Deleting all rooms...');
+        try {
+          const count = await adminDeleteAllRooms();
+          setStatus(`Deleted ${count} room${count === 1 ? '' : 's'}.`);
+          if (confirmInput) {
+            confirmInput.value = '';
+          }
+        } catch (error) {
+          const message = error && error.message ? error.message : 'Failed to delete rooms.';
+          setStatus(message);
+        }
+      });
+    }
+
+    const backButton = overlayState.panel.querySelector('#stickfight-admin-back');
+    if (backButton) {
+      backButton.addEventListener('click', () => {
+        renderCreateLobby();
+      });
+    }
+
+    updateRoomsTable();
   };
 
   const hideOverlay = () => {
@@ -478,6 +852,63 @@ function ensureAuthReady() {
         color: rgba(182, 235, 255, 0.9);
         min-height: 1.2em;
       }
+      .stickfight-rooms-section {
+        margin-top: 32px;
+        padding: 20px;
+        border: 1px solid rgba(11, 180, 255, 0.25);
+        border-radius: 12px;
+        background: rgba(10, 22, 36, 0.6);
+      }
+      .stickfight-rooms-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 16px;
+        gap: 16px;
+      }
+      .stickfight-rooms-header h3 {
+        margin: 0;
+        font-size: 1.2rem;
+        font-weight: 600;
+      }
+      .stickfight-rooms-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.95rem;
+      }
+      .stickfight-rooms-table th,
+      .stickfight-rooms-table td {
+        padding: 10px 12px;
+        text-align: left;
+        border-bottom: 1px solid rgba(11, 180, 255, 0.12);
+      }
+      .stickfight-rooms-table tbody tr:hover {
+        background: rgba(11, 180, 255, 0.08);
+      }
+      .stickfight-empty {
+        margin: 0;
+        color: rgba(200, 224, 255, 0.7);
+        font-size: 0.95rem;
+      }
+      .stickfight-admin-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        margin-bottom: 24px;
+      }
+      .stickfight-admin-inline {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      .stickfight-admin-inline input[type="text"] {
+        flex: 1;
+      }
+      .stickfight-admin-status {
+        min-height: 1.2em;
+        font-size: 0.95rem;
+        color: rgba(182, 235, 255, 0.9);
+      }
     `;
     document.head.appendChild(style);
   };
@@ -516,6 +947,7 @@ function ensureAuthReady() {
         <div class="stickfight-lobby-error" id="stickfight-create-error"></div>
         <button type="submit" class="stickfight-primary-button" id="stickfight-create-button">Create Game</button>
       </form>
+      ${roomsSectionMarkup()}
     `);
 
     const form = overlayState.panel.querySelector('#stickfight-create-form');
@@ -547,6 +979,9 @@ function ensureAuthReady() {
         busy = false;
       }
     });
+
+    attachAdminEntryHandler();
+    updateRoomsTable();
   };
 
   const renderHostShare = (result) => {
@@ -564,6 +999,7 @@ function ensureAuthReady() {
       <div style="margin-top: 24px; display: flex; justify-content: flex-end;">
         <button type="button" class="stickfight-primary-button" id="stickfight-enter-button">Enter Lobby</button>
       </div>
+      ${roomsSectionMarkup()}
     `);
 
     const shareInput = overlayState.panel.querySelector('#stickfight-share-input');
@@ -620,6 +1056,9 @@ function ensureAuthReady() {
         emitEvent('lobbyDismissed', { roomId, isHost: true });
       });
     }
+
+    attachAdminEntryHandler();
+    updateRoomsTable();
   };
 
   const renderJoinForm = (roomId) => {
@@ -635,6 +1074,7 @@ function ensureAuthReady() {
         <div class="stickfight-lobby-error" id="stickfight-join-error"></div>
         <button type="submit" class="stickfight-primary-button" id="stickfight-join-button">Join Lobby</button>
       </form>
+      ${roomsSectionMarkup()}
     `);
 
     const form = overlayState.panel.querySelector('#stickfight-join-form');
@@ -666,6 +1106,9 @@ function ensureAuthReady() {
         busy = false;
       }
     });
+
+    attachAdminEntryHandler();
+    updateRoomsTable();
   };
 
   const renderJoinSuccess = (result) => {
@@ -695,6 +1138,7 @@ function ensureAuthReady() {
       <div style="display: flex; justify-content: flex-end; margin-top: 24px;">
         <button type="button" class="stickfight-primary-button" id="stickfight-create-from-invalid">Create New Game</button>
       </div>
+      ${roomsSectionMarkup()}
     `);
 
     const button = overlayState.panel.querySelector('#stickfight-create-from-invalid');
@@ -703,11 +1147,15 @@ function ensureAuthReady() {
         renderCreateLobby();
       });
     }
+
+    attachAdminEntryHandler();
+    updateRoomsTable();
   };
 
   const initializeOverlayFlow = () => {
     createStyles();
     ensureOverlay();
+    startLobbyRoomsListener();
     if (!overlayState.overlay) {
       return;
     }
@@ -758,5 +1206,12 @@ function ensureAuthReady() {
     buildShareUrl,
     hideOverlay,
     showOverlay,
+    adminCreateRoom,
+    adminDeleteRoomByCode,
+    adminDeleteAllRooms,
+    showAdminPanel: () => {
+      overlayState.isAdmin = true;
+      renderAdminPanel();
+    },
   });
 })(typeof window !== 'undefined' ? window : this);
