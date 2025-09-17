@@ -4082,7 +4082,9 @@ if (typeof this.positionNetDiagOverlay === 'function') {
           return;
         }
 
-        snapshot.moveX = Phaser.Math.Clamp(vector.x, -1, 1);
+        const maxComponent = Math.max(Math.abs(vector.x), Math.abs(vector.y));
+        const normalizedX = maxComponent > 0 ? vector.x / maxComponent : 0;
+        snapshot.moveX = Phaser.Math.Clamp(normalizedX * vector.magnitude, -1, 1);
 
         const crouchActive = vector.y >= JOYSTICK_CROUCH_THRESHOLD;
         snapshot.crouch = crouchActive;
