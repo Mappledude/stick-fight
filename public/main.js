@@ -1,3 +1,7 @@
+if (!window.__FIREBASE_CONFIG__) {
+  throw new Error('CFG_MISSING: window.__FIREBASE_CONFIG__ not defined');
+}
+
 (function () {
   const Boot = (() => {
     if (typeof window !== 'undefined' && window.__StickFightBoot) {
