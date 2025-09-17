@@ -236,8 +236,8 @@
       this.setAlpha(1);
       this.setVisible(true);
 
-      const color = config.color ?? 0xffffff;
-      const lineWidth = config.lineWidth ?? 4;
+      const color = config.color != null ? config.color : 0xffffff;
+      const lineWidth = config.lineWidth != null ? config.lineWidth : 4;
 
       const head = scene.add.circle(0, -20, 10, color, 1);
       head.setStrokeStyle(2, color, 1);
@@ -411,12 +411,19 @@
         }
       }
 
+      const phaserTouchDevice =
+        this.sys &&
+        this.sys.game &&
+        this.sys.game.device &&
+        this.sys.game.device.input &&
+        this.sys.game.device.input.touch;
+
       const hasTouchSupport = [
         nav && typeof nav.maxTouchPoints === 'number' && nav.maxTouchPoints > 0,
         nav && typeof nav.msMaxTouchPoints === 'number' && nav.msMaxTouchPoints > 0,
         win && 'ontouchstart' in win,
         win && typeof win.matchMedia === 'function' && win.matchMedia('(pointer: coarse)').matches,
-        this.sys?.game?.device?.input?.touch,
+        phaserTouchDevice,
       ].some(Boolean);
 
       if (this._forceKeyboard) {
@@ -473,7 +480,10 @@
         if (this._forceKeyboard) {
           return;
         }
-        const pointerEventType = pointer?.event?.type;
+        let pointerEventType;
+        if (pointer && pointer.event) {
+          pointerEventType = pointer.event.type;
+        }
         const isTouchPointer =
           !!pointer &&
           (pointer.pointerType === 'touch' ||
@@ -739,7 +749,8 @@
         state.moveX = Phaser.Math.Clamp(moveX, -1, 1);
 
         const holds = this.keyboardHoldStates[player];
-        const crouch = (holds?.crouch || false) || joystick.crouch;
+        const holdCrouch = holds && holds.crouch ? holds.crouch : false;
+        const crouch = holdCrouch || joystick.crouch;
         state.crouch = !!crouch;
 
         const jumpQueue = this.keyboardJumpQueue[player];
@@ -896,7 +907,9 @@
         fighter.setFacing(facingDirection);
       }
 
-      const onGround = body.blocked.down || body.touching.down || body.onFloor?.();
+      const bodyOnFloor =
+        body.onFloor && typeof body.onFloor === 'function' ? body.onFloor.call(body) : false;
+      const onGround = body.blocked.down || body.touching.down || bodyOnFloor;
       const canControl = !fighter.isAttacking;
 
       const wantsCrouch = !!(input && input.crouch && onGround && canControl);
@@ -1181,12 +1194,14 @@
     }
 
     updateActionHoldState(player, key) {
-      const pointerActive = this.pointerStates[player][key]?.size > 0;
+      const pointerSet = this.pointerStates[player][key];
+      const pointerActive = pointerSet ? pointerSet.size > 0 : false;
       const state = this.getPlayerInput(player);
       if (state) {
         state[key] = pointerActive;
       }
-      const button = this.touchButtons[player]?.[key];
+      const buttonGroup = this.touchButtons[player];
+      const button = buttonGroup ? buttonGroup[key] : undefined;
       if (button) {
         this.setButtonActive(button, pointerActive);
       }
@@ -1203,10 +1218,12 @@
         state.jumpUp = false;
         state.jumpForward = false;
         state.jumpBack = false;
-        if (!(this.pointerStates[player].punch?.size > 0)) {
+        const punchSet = this.pointerStates[player].punch;
+        if (!(punchSet && punchSet.size > 0)) {
           state.punch = false;
         }
-        if (!(this.pointerStates[player].kick?.size > 0)) {
+        const kickSet = this.pointerStates[player].kick;
+        if (!(kickSet && kickSet.size > 0)) {
           state.kick = false;
         }
         const queue = this.keyboardJumpQueue[player];
@@ -1509,7 +1526,9 @@
         return;
       }
       const { width } = this.scale.gameSize;
-      const topOffset = (this.safeAreaInsets?.top || 0) + 12;
+      const safeInsets = this.safeAreaInsets || {};
+      const topInset = typeof safeInsets.top === 'number' ? safeInsets.top : 0;
+      const topOffset = topInset + 12;
       this.debugText.setPosition(width / 2, topOffset);
     }
 
