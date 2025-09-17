@@ -1,3 +1,6 @@
+import { getFirebaseConfig } from '../config/firebaseConfig';
+import { debugLog } from './debug';
+
 const DEVICE_ID_KEY = 'deviceId';
 const LOG_PREFIX = '[AUTH]';
 
@@ -53,15 +56,19 @@ export async function ensureSignedInUser(): Promise<{ auth: FirebaseAuth; user: 
   }
   if (auth.currentUser) {
     const deviceId = getDeviceId();
-    if (typeof console !== 'undefined' && console && typeof console.log === 'function') {
-      console.log(`${LOG_PREFIX} uid=${auth.currentUser.uid} deviceId=${deviceId}`);
-    }
+    debugLog(`${LOG_PREFIX} uid=${auth.currentUser.uid} deviceId=${deviceId}`);
     return { auth, user: auth.currentUser };
   }
   if (!signingIn) {
     if (typeof auth.signInAnonymously !== 'function') {
       throw new Error('Firebase Auth does not support anonymous sign-in.');
     }
+    const config = getFirebaseConfig();
+    const apiKey = typeof config.apiKey === 'string' ? config.apiKey : '';
+    const apiKeyHead = apiKey ? apiKey.slice(0, 6) : 'unknown';
+    debugLog(
+      `${LOG_PREFIX} signInAnonymously() project=${config.projectId} apiKeyHead=${apiKeyHead}`,
+    );
     signingIn = auth
       .signInAnonymously()
       .then((cred) => {
@@ -71,14 +78,30 @@ export async function ensureSignedInUser(): Promise<{ auth: FirebaseAuth; user: 
         }
         return { auth, user };
       })
+      .catch((error: unknown) => {
+        if (typeof console !== 'undefined' && console && typeof console.error === 'function') {
+          console.error(`${LOG_PREFIX} signInAnonymously() failed`, error);
+        }
+        const message =
+          (error && typeof error === 'object' && 'message' in error && typeof (error as any).message === 'string'
+            ? (error as any).message
+            : 'Failed to sign in anonymously.');
+        const code =
+          error && typeof error === 'object' && 'code' in error && typeof (error as any).code === 'string'
+            ? (error as any).code
+            : undefined;
+        const wrappedError = new Error(message);
+        if (code) {
+          (wrappedError as any).code = code;
+        }
+        throw wrappedError;
+      })
       .finally(() => {
         signingIn = null;
       });
   }
   const result = await signingIn;
   const deviceId = getDeviceId();
-  if (typeof console !== 'undefined' && console && typeof console.log === 'function') {
-    console.log(`${LOG_PREFIX} uid=${result.user.uid} deviceId=${deviceId}`);
-  }
+  debugLog(`${LOG_PREFIX} uid=${result.user.uid} deviceId=${deviceId}`);
   return result;
 }
