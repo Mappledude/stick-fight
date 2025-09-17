@@ -563,12 +563,7 @@
       this._forceJoystick = false;
       this._forceKeyboard = false;
       this._joyDiagEnabled = false;
-      this._joyDiagModes = {
-        noControls: false,
-        noJoystick: false,
-        joystickOnly: false,
-        joyTest: false,
-      };
+      this._joyDiagModes = this.getDefaultJoyDiagModes();
 
       const parseDebugFlag = (value) => {
         if (typeof value !== 'string') {
@@ -579,24 +574,55 @@
       };
 
       if (win && win.location && typeof win.location.search === 'string') {
+        const searchString = win.location.search;
+        const joyDiagParser =
+          win &&
+          win.StickFightJoyDiag &&
+          typeof win.StickFightJoyDiag.parseJoyDiagConfig === 'function'
+            ? win.StickFightJoyDiag.parseJoyDiagConfig
+            : null;
+        const parsedJoyDiag = joyDiagParser ? joyDiagParser(searchString) : null;
+
         if (typeof URLSearchParams === 'function') {
-          const params = new URLSearchParams(win.location.search);
+          const params = new URLSearchParams(searchString);
           this._forceJoystick = parseDebugFlag(params.get('forceJoystick'));
           this._forceKeyboard = parseDebugFlag(params.get('forceKeyboard'));
-          this._joyDiagEnabled = parseDebugFlag(params.get('joydiag'));
-          this._joyDiagModes.noControls = parseDebugFlag(params.get('nocontrols'));
-          this._joyDiagModes.noJoystick = parseDebugFlag(params.get('nojoystick'));
-          this._joyDiagModes.joystickOnly = parseDebugFlag(params.get('joyonly'));
-          this._joyDiagModes.joyTest = parseDebugFlag(params.get('joytest'));
+
+          if (parsedJoyDiag) {
+            this.applyJoyDiagConfig(parsedJoyDiag);
+          } else {
+            this.applyJoyDiagConfig({
+              enabled: parseDebugFlag(params.get('joydiag')),
+              modes: {
+                noControls: parseDebugFlag(params.get('nocontrols')),
+                noJoystick: parseDebugFlag(params.get('nojoystick')),
+                joystickOnly: parseDebugFlag(params.get('joyonly')),
+                joyTest: parseDebugFlag(params.get('joytest')),
+              },
+            });
+          }
         } else {
-          const searchLower = win.location.search.toLowerCase();
+          const searchLower = searchString.toLowerCase();
           this._forceJoystick = /[?&]forcejoystick=(1|true|yes|on)\b/.test(searchLower);
           this._forceKeyboard = /[?&]forcekeyboard=(1|true|yes|on)\b/.test(searchLower);
-          this._joyDiagEnabled = /[?&]joydiag=(1|true|yes|on)\b/.test(searchLower);
-          this._joyDiagModes.noControls = /[?&]nocontrols=(1|true|yes|on)\b/.test(searchLower);
-          this._joyDiagModes.noJoystick = /[?&]nojoystick=(1|true|yes|on)\b/.test(searchLower);
-          this._joyDiagModes.joystickOnly = /[?&]joyonly=(1|true|yes|on)\b/.test(searchLower);
-          this._joyDiagModes.joyTest = /[?&]joytest=(1|true|yes|on)\b/.test(searchLower);
+
+          if (parsedJoyDiag) {
+            this.applyJoyDiagConfig(parsedJoyDiag);
+          } else {
+            const joyDiagEnabled = /[?&]joydiag=(1|true|yes|on)\b/.test(searchLower);
+            this.applyJoyDiagConfig({
+              enabled: joyDiagEnabled,
+              modes: {
+                noControls:
+                  joyDiagEnabled && /[?&]nocontrols=(1|true|yes|on)\b/.test(searchLower),
+                noJoystick:
+                  joyDiagEnabled && /[?&]nojoystick=(1|true|yes|on)\b/.test(searchLower),
+                joystickOnly:
+                  joyDiagEnabled && /[?&]joyonly=(1|true|yes|on)\b/.test(searchLower),
+                joyTest: joyDiagEnabled && /[?&]joytest=(1|true|yes|on)\b/.test(searchLower),
+              },
+            });
+          }
         }
       }
 
@@ -643,6 +669,37 @@
         p1: { up: false, forward: false, back: false },
         p2: { up: false, forward: false, back: false },
       };
+    }
+
+    getDefaultJoyDiagModes() {
+      return {
+        noControls: false,
+        noJoystick: false,
+        joystickOnly: false,
+        joyTest: false,
+      };
+    }
+
+    resetJoyDiagModes() {
+      if (!this._joyDiagModes) {
+        this._joyDiagModes = this.getDefaultJoyDiagModes();
+        return;
+      }
+      Object.assign(this._joyDiagModes, this.getDefaultJoyDiagModes());
+    }
+
+    applyJoyDiagConfig(config) {
+      const safeConfig = config || {};
+      const modes = safeConfig.modes || {};
+      this._joyDiagEnabled = !!safeConfig.enabled;
+      if (!this._joyDiagEnabled) {
+        this.resetJoyDiagModes();
+        return;
+      }
+      this._joyDiagModes.noControls = !!modes.noControls;
+      this._joyDiagModes.noJoystick = !!modes.noJoystick;
+      this._joyDiagModes.joystickOnly = !!modes.joystickOnly;
+      this._joyDiagModes.joyTest = !!modes.joyTest;
     }
 
     diagnosticsActive() {
@@ -985,7 +1042,7 @@
     create() {
       this.cameras.main.setBackgroundColor('#111');
 
-      if (this._joyDiagEnabled && typeof console !== 'undefined' && console) {
+      if (this.diagnosticsActive() && typeof console !== 'undefined' && console) {
         const modes = [];
         if (this._joyDiagModes.noControls) {
           modes.push('nocontrols');
@@ -1647,7 +1704,7 @@
     }
 
     createTouchControls() {
-      if (this._joyDiagModes.noControls) {
+      if (this.diagnosticsActive() && this._joyDiagModes.noControls) {
         return;
       }
 
@@ -1664,8 +1721,10 @@
         return button;
       };
 
-      const joystickOnly = this._joyDiagModes.joystickOnly;
-      const createJoysticks = joystickOnly || !this._joyDiagModes.noJoystick;
+      const diagnosticsActive = this.diagnosticsActive();
+      const joystickOnly = diagnosticsActive && this._joyDiagModes.joystickOnly;
+      const createJoysticks =
+        joystickOnly || !(diagnosticsActive && this._joyDiagModes.noJoystick);
       const createButtons = !joystickOnly;
 
       if (createJoysticks) {
