@@ -246,6 +246,7 @@
       this.roomUnsub = null;
       this.signalUnsubs = {};
       this.peerEntries = {};
+      this.playerPeerIdsByUid = {};
       this.stopped = false;
     }
 
@@ -344,6 +345,7 @@
         }
       }
       this.peerEntries = {};
+      this.playerPeerIdsByUid = {};
       const scene = this.scene;
       if (scene && scene.net) {
         scene.net.pcMap = {};
@@ -532,15 +534,34 @@
         }
         snapshot.docChanges().forEach((change) => {
           const doc = change.doc;
-          const guestId = doc ? doc.id : null;
-          if (!guestId || guestId === this.peerId) {
+          if (!doc) {
+            return;
+          }
+          const uid = doc.id;
+          const data = (typeof doc.data === 'function' ? doc.data() : {}) || {};
+          const peerId = data.peerId || (uid ? this.playerPeerIdsByUid[uid] : null);
+          if (!peerId) {
+            if (change.type === 'removed' && uid && this.playerPeerIdsByUid[uid]) {
+              const storedPeerId = this.playerPeerIdsByUid[uid];
+              delete this.playerPeerIdsByUid[uid];
+              this.teardownPeer(storedPeerId);
+            } else if (change.type !== 'removed') {
+              console.warn('[StickFight] Player document missing peerId', { uid });
+            }
             return;
           }
           if (change.type === 'removed') {
-            this.teardownPeer(guestId);
+            delete this.playerPeerIdsByUid[uid];
+            if (peerId !== this.peerId) {
+              this.teardownPeer(peerId);
+            }
             return;
           }
-          this.hostAcceptGuest(guestId);
+          this.playerPeerIdsByUid[uid] = peerId;
+          if (peerId === this.peerId) {
+            return;
+          }
+          this.hostAcceptGuest(peerId);
         });
       });
     }

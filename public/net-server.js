@@ -98,6 +98,7 @@
       facing: player.facing || 1,
       halfWidth: player.halfWidth,
       halfHeight: player.halfHeight,
+      hp: Number.isFinite(player.hp) ? player.hp : 100,
     };
   }
 
@@ -282,6 +283,7 @@
         facing: spawn.facing || 1,
         halfWidth: Number.isFinite(details.halfWidth) ? details.halfWidth : HALF_WIDTH,
         halfHeight: Number.isFinite(details.halfHeight) ? details.halfHeight : HALF_HEIGHT,
+        hp: Number.isFinite(details.hp) ? details.hp : 100,
       };
 
       registry.players.set(id, player);
