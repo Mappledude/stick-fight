@@ -1369,6 +1369,7 @@
       this.createTouchControls();
       this.registerKeyboardControls();
       this.createDebugOverlay();
+      this.logTouchControlsCreationDiagnostics();
 
       if (this.diagnosticsActive()) {
         this.ensureJoyDiagHudVisible();
@@ -2023,6 +2024,153 @@
       if (joystickOnly) {
         this.hideLegacyTouchContainers();
       }
+    }
+
+    logTouchControlsCreationDiagnostics() {
+      if (!this.diagnosticsActive()) {
+        return;
+      }
+
+      const describeInputState = (inputState) => {
+        if (!inputState) {
+          return { exists: false };
+        }
+        const ctor = inputState.constructor ? inputState.constructor.name : null;
+        return {
+          exists: true,
+          constructor: ctor,
+          hasMoveX: Object.prototype.hasOwnProperty.call(inputState, 'moveX'),
+        };
+      };
+
+      const overlayDepths = {
+        titleText:
+          this.titleText && typeof this.titleText.depth === 'number' ? this.titleText.depth : null,
+        debugText:
+          this.debugText && typeof this.debugText.depth === 'number' ? this.debugText.depth : null,
+      };
+
+      const legacySources = [
+        this.legacyTouchControls,
+        this.legacyTouchButtons,
+        this.legacyDPad,
+        this.legacyDpad,
+        this.legacyDpadButtons,
+        this.dpad,
+        this.dpadContainer,
+        this.arrowControls,
+        this.arrowButtons,
+      ];
+
+      const legacyDepths = [];
+      const visited = new Set();
+      const recordLegacyDepth = (item) => {
+        if (!item || visited.has(item)) {
+          return;
+        }
+        visited.add(item);
+        if (Array.isArray(item)) {
+          item.forEach(recordLegacyDepth);
+          return;
+        }
+        if (typeof item.depth === 'number') {
+          legacyDepths.push(item.depth);
+        }
+        if (item.container && item.container !== item) {
+          recordLegacyDepth(item.container);
+        }
+      };
+      legacySources.forEach(recordLegacyDepth);
+
+      const legacySummary = legacyDepths.length
+        ? {
+            depths: legacyDepths.slice().sort((a, b) => a - b),
+            highest: Math.max(...legacyDepths),
+          }
+        : { depths: [], highest: null };
+
+      const describeJoystick = (playerKey) => {
+        const joystick = this.virtualJoysticks ? this.virtualJoysticks[playerKey] : null;
+        if (!joystick) {
+          return { exists: false };
+        }
+
+        const ctor = joystick.constructor ? joystick.constructor.name : null;
+        const interactive = joystick.input || null;
+        const hitArea = interactive && interactive.hitArea ? interactive.hitArea : null;
+        const hitAreaRadius = hitArea && typeof hitArea.radius === 'number' ? hitArea.radius : null;
+        const joystickDepth = typeof joystick.depth === 'number' ? joystick.depth : null;
+        const overlayComparisons = {};
+        Object.keys(overlayDepths).forEach((key) => {
+          const overlayDepth = overlayDepths[key];
+          overlayComparisons[key] =
+            joystickDepth !== null && typeof overlayDepth === 'number'
+              ? joystickDepth - overlayDepth
+              : null;
+        });
+
+        const outerDepth = joystick.outerRing && typeof joystick.outerRing.depth === 'number'
+          ? joystick.outerRing.depth
+          : null;
+        const knobDepth = joystick.knob && typeof joystick.knob.depth === 'number'
+          ? joystick.knob.depth
+          : null;
+
+        const joystickAboveLegacy =
+          legacySummary.highest !== null && joystickDepth !== null
+            ? joystickDepth >= legacySummary.highest
+            : null;
+        const legacyOverlaysAbove =
+          joystickDepth !== null
+            ? legacyDepths.filter((depth) => typeof depth === 'number' && depth > joystickDepth)
+            : [];
+
+        return {
+          exists: true,
+          constructor: ctor,
+          depth: joystickDepth,
+          overlayDepthDelta: overlayComparisons,
+          legacy: {
+            highestLegacyDepth: legacySummary.highest,
+            joystickAboveAllLegacy: joystickAboveLegacy,
+            overlaysAboveJoystick: legacyOverlaysAbove,
+          },
+          interactiveZone: {
+            hitRadius: hitAreaRadius,
+            effectiveRadius:
+              typeof joystick.radius === 'number' && typeof joystick.hitPadding === 'number'
+                ? joystick.radius + joystick.hitPadding
+                : null,
+            ownerIsJoystick:
+              interactive && interactive.gameObject ? interactive.gameObject === joystick : null,
+          },
+          knobDepth: knobDepth,
+          outerRingDepth: outerDepth,
+          knobAboveOuter:
+            knobDepth !== null && outerDepth !== null ? knobDepth > outerDepth : null,
+        };
+      };
+
+      const reconcileSource =
+        typeof this.reconcileInputState === 'function' ? String(this.reconcileInputState) : '';
+      const assignsMoveX = /state\.moveX\s*=/.test(reconcileSource);
+
+      this.logJoyDiag('controls:create', {
+        joysticks: {
+          p1: describeJoystick('p1'),
+          p2: describeJoystick('p2'),
+        },
+        inputs: {
+          p1: describeInputState(this.p1Input),
+          p2: describeInputState(this.p2Input),
+        },
+        reconcile: {
+          hasMethod: typeof this.reconcileInputState === 'function',
+          assignsMoveX,
+        },
+        overlays: overlayDepths,
+        legacy: legacySummary,
+      });
     }
 
     hideLegacyTouchContainers() {
