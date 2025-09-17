@@ -907,6 +907,9 @@
       this._layoutReadyLogPrinted = false;
       this._resizeDebounceEvent = null;
       this._pendingResizeSize = null;
+      this._joyDiagFrameIndex = 0;
+      this._joyDiagFrameState = null;
+      this._joyDiagOrderState = { lastSignature: null, lastFrame: null };
       this.joystickSnapshots = {
         p1: this.createJoystickSnapshot(),
         p2: this.createJoystickSnapshot(),
@@ -1628,26 +1631,76 @@
 
     update(time, delta) {
       this.dt = Math.min(delta, 50) / 1000;
+
+      this._joyDiagFrameIndex = (this._joyDiagFrameIndex || 0) + 1;
+      const diagnosticsActive = this.diagnosticsActive();
+      if (diagnosticsActive) {
+        this._joyDiagFrameState = {
+          frame: this._joyDiagFrameIndex,
+          order: [],
+          sources: {},
+          overrideEvents: [],
+          preResetMoveX: this.p1Input ? this.p1Input.moveX : null,
+        };
+      } else {
+        this._joyDiagFrameState = null;
+      }
+
       this.reconcileInputState();
 
       if (this._fighters && this._fighters.length) {
         const [p1, p2] = this._fighters;
         if (p1) {
+          if (this._joyDiagFrameState) {
+            this._joyDiagFrameState.order.push('updateFighterMovement:p1');
+          }
           this.updateFighterMovement(p1, this.p1Input, p2, this.dt);
         }
         if (p2) {
+          if (this._joyDiagFrameState) {
+            this._joyDiagFrameState.order.push('updateFighterMovement:p2');
+          }
           this.updateFighterMovement(p2, this.p2Input, p1, this.dt);
         }
       }
 
       this._fighters.forEach((fighter) => fighter.update(this.dt));
+
+      if (this._joyDiagFrameState) {
+        this._joyDiagFrameState.preResetMoveX = this.p1Input ? this.p1Input.moveX : null;
+      }
+
       this.resetMomentaryInputFlags();
+
+      if (this._joyDiagFrameState) {
+        const afterReset = this.p1Input ? this.p1Input.moveX : null;
+        if (afterReset !== this._joyDiagFrameState.preResetMoveX) {
+          this._joyDiagFrameState.overrideEvents.push({
+            type: 'endOfFrameReset',
+            stage: 'resetMomentaryInputFlags',
+            before: this._joyDiagFrameState.preResetMoveX,
+            after: afterReset,
+          });
+        }
+      }
+
       this.updateDebugOverlay();
       traceControls(this);
+
+      if (this._joyDiagFrameState) {
+        this.flushJoyDiagFrameDiagnostics();
+      }
     }
 
     reconcileInputState() {
       this.updateJoystickSnapshots();
+
+      if (this._joyDiagFrameState) {
+        const order = this._joyDiagFrameState.order;
+        if (!order.includes('reconcile')) {
+          order.push('reconcile');
+        }
+      }
 
       ['p1', 'p2'].forEach((player) => {
         const state = this.getPlayerInput(player);
@@ -1657,8 +1710,42 @@
 
         const joystick = this.joystickSnapshots[player];
         const keyboardMoveX = this.determineKeyboardMoveX(player);
-        const moveX = keyboardMoveX !== 0 ? keyboardMoveX : joystick.moveX;
-        state.moveX = Phaser.Math.Clamp(moveX, -1, 1);
+        const joystickMoveX = joystick ? joystick.moveX : 0;
+        const joystickHasInput = Math.abs(joystickMoveX) > 0.0001;
+        const keyboardHasInput = keyboardMoveX !== 0;
+        const forcingKeyboard = player === 'p1' && this._forceKeyboard;
+        let moveSource = 'joystick';
+        let resolvedMoveX = joystickMoveX;
+        let overrideType = null;
+
+        if (forcingKeyboard || keyboardHasInput) {
+          resolvedMoveX = keyboardHasInput ? keyboardMoveX : 0;
+          moveSource = keyboardHasInput ? 'keyboard' : 'keyboard-forced';
+          if (player === 'p1' && joystickHasInput && resolvedMoveX !== joystickMoveX) {
+            overrideType = forcingKeyboard ? 'forceKeyboard' : 'keyboardFallback';
+          }
+        }
+
+        state.moveX = Phaser.Math.Clamp(resolvedMoveX, -1, 1);
+
+        if (this._joyDiagFrameState) {
+          const frameState = this._joyDiagFrameState;
+          frameState.sources[player] = {
+            source: moveSource,
+            keyboard: keyboardMoveX,
+            joystick: joystickMoveX,
+            forced: forcingKeyboard && !keyboardHasInput,
+          };
+          if (player === 'p1' && overrideType) {
+            frameState.overrideEvents.push({
+              type: overrideType,
+              stage: 'reconcileInputState',
+              keyboard: keyboardMoveX,
+              joystick: joystickMoveX,
+              applied: state.moveX,
+            });
+          }
+        }
 
         const holds = this.keyboardHoldStates[player];
         const holdCrouch = holds && holds.crouch ? holds.crouch : false;
@@ -1688,6 +1775,130 @@
           state.jumpUp = true;
         }
       });
+    }
+
+
+    flushJoyDiagFrameDiagnostics() {
+      const frameState = this._joyDiagFrameState;
+      this._joyDiagFrameState = null;
+      if (!frameState) {
+        return;
+      }
+      const orderState = this._joyDiagOrderState || (this._joyDiagOrderState = {});
+      const order = frameState.order ? frameState.order.slice() : [];
+      const reconcileIndex = order.indexOf('reconcile');
+      const firstMovementIndex = order.findIndex((entry) =>
+        typeof entry === 'string' && entry.startsWith('updateFighterMovement')
+      );
+      const reconcileBeforeMovement =
+        reconcileIndex !== -1 && (firstMovementIndex === -1 || reconcileIndex < firstMovementIndex);
+      const signature = order.length ? order.join('>') : 'none';
+
+      if (this.diagnosticsActive()) {
+        if (!orderState.lastSignature || orderState.lastSignature !== signature) {
+          orderState.lastSignature = signature;
+          orderState.lastFrame = frameState.frame;
+          const payload = {
+            frame: frameState.frame,
+            order,
+            reconcileBeforeMovement,
+            moveSources: frameState.sources || {},
+          };
+          const topOnly = this.buildTopOnlyDiagnostics();
+          if (topOnly) {
+            payload.topOnly = topOnly;
+          }
+          this.logJoyDiag('controls:order', payload);
+        }
+        const overrides = frameState.overrideEvents || [];
+        const seen = new Set();
+        overrides.forEach((event) => {
+          if (!event || !event.type) {
+            return;
+          }
+          const key = `${event.type}:${event.stage}`;
+          if (seen.has(key)) {
+            return;
+          }
+          seen.add(key);
+          this.logJoyDiag('controls:override', {
+            frame: frameState.frame,
+            ...event,
+          });
+        });
+      }
+    }
+
+    buildTopOnlyDiagnostics() {
+      const inputPlugin = this.input;
+      const manager = inputPlugin && inputPlugin.manager ? inputPlugin.manager : null;
+      if (!manager) {
+        return null;
+      }
+      const active = !!manager.topOnly;
+      const result = { active };
+      if (!active) {
+        return result;
+      }
+
+      const pointers = manager.pointers || [];
+      const camera = this.cameras && this.cameras.main ? this.cameras.main : null;
+      const sceneChildren = this.children && this.children.list ? this.children.list : [];
+      const pointerDetails = {};
+      ['p1', 'p2'].forEach((playerKey) => {
+        const joystick = this.virtualJoysticks ? this.virtualJoysticks[playerKey] : null;
+        if (!joystick) {
+          return;
+        }
+        const pointerId =
+          typeof joystick.pointerId === 'number' || typeof joystick.pointerId === 'string'
+            ? joystick.pointerId
+            : null;
+        if (pointerId === null) {
+          return;
+        }
+        const pointer = pointers.find((ptr) => ptr && ptr.id === pointerId);
+        if (!pointer) {
+          pointerDetails[playerKey] = {
+            pointerId,
+            joystickIsTop: null,
+          };
+          return;
+        }
+        const hitTest =
+          typeof manager.hitTest === 'function'
+            ? manager.hitTest(pointer, sceneChildren, camera)
+            : null;
+        const topObject = Array.isArray(hitTest) && hitTest.length > 0 ? hitTest[0] : null;
+        let joystickIsTop = false;
+        if (topObject) {
+          if (topObject === joystick) {
+            joystickIsTop = true;
+          } else if (topObject.parentContainer) {
+            let parent = topObject.parentContainer;
+            while (parent && !joystickIsTop) {
+              if (parent === joystick) {
+                joystickIsTop = true;
+              }
+              parent = parent.parentContainer;
+            }
+          }
+        }
+        pointerDetails[playerKey] = {
+          pointerId,
+          pointerX: typeof pointer.x === 'number' ? pointer.x : null,
+          pointerY: typeof pointer.y === 'number' ? pointer.y : null,
+          joystickIsTop,
+          topObjectType: topObject
+            ? topObject.name || topObject.type || (topObject.constructor && topObject.constructor.name)
+            : null,
+        };
+      });
+
+      if (Object.keys(pointerDetails).length > 0) {
+        result.pointers = pointerDetails;
+      }
+      return result;
     }
 
     createPlayerInputState() {
