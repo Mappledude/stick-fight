@@ -18,9 +18,17 @@
     statusList: null,
     errorBox: null,
     statuses: [],
+    debugDrawer: null,
+    debugToggle: null,
+    debugTextarea: null,
+    debugCopyButton: null,
+    debugEntries: [],
     lastError: null,
     hideTimer: null,
     maxStatusEntries: 16,
+    maxDebugEntries: 200,
+    drawerVisible: false,
+    shortcutsBound: false,
     ready: false,
   };
 
@@ -142,6 +150,171 @@
     }
   }
 
+  function ensureDebugDrawer() {
+    if (state.debugDrawer || !doc) {
+      return state.debugDrawer;
+    }
+
+    const drawer = doc.createElement('section');
+    drawer.id = 'boot-debug-drawer';
+    drawer.setAttribute('data-open', 'false');
+
+    const header = doc.createElement('div');
+    header.className = 'boot-debug-drawer__header';
+
+    const toggle = doc.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'boot-debug-drawer__toggle';
+    toggle.textContent = 'Debug Logs';
+    toggle.setAttribute('aria-expanded', 'false');
+    header.appendChild(toggle);
+
+    const copy = doc.createElement('button');
+    copy.type = 'button';
+    copy.className = 'boot-debug-drawer__copy';
+    copy.textContent = 'Copy Logs';
+    copy.setAttribute('title', 'Copy debug logs to clipboard');
+    header.appendChild(copy);
+
+    const body = doc.createElement('div');
+    body.className = 'boot-debug-drawer__body';
+
+    const textarea = doc.createElement('textarea');
+    textarea.id = 'debug-copy';
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.className = 'boot-debug-drawer__textarea';
+    body.appendChild(textarea);
+
+    drawer.appendChild(header);
+    drawer.appendChild(body);
+
+    doc.body.appendChild(drawer);
+
+    const toggleDrawer = () => {
+      setDebugDrawerVisibility(!state.drawerVisible);
+    };
+
+    toggle.addEventListener('click', (event) => {
+      event.preventDefault();
+      toggleDrawer();
+    });
+
+    copy.addEventListener('click', (event) => {
+      event.preventDefault();
+      copyDebugLogs();
+    });
+
+    state.debugDrawer = drawer;
+    state.debugToggle = toggle;
+    state.debugCopyButton = copy;
+    state.debugTextarea = textarea;
+
+    bindShortcuts();
+    updateDebugDrawer();
+
+    return state.debugDrawer;
+  }
+
+  function bindShortcuts() {
+    if (state.shortcutsBound || !doc) {
+      return;
+    }
+    doc.addEventListener('keydown', (event) => {
+      if (!event || event.defaultPrevented) {
+        return;
+      }
+      const key = event.key || '';
+      const isToggleKey = key.toLowerCase() === 'c';
+      if (!isToggleKey || !event.shiftKey || !(event.ctrlKey || event.metaKey)) {
+        return;
+      }
+      ensureDebugDrawer();
+      setDebugDrawerVisibility(!state.drawerVisible);
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    state.shortcutsBound = true;
+  }
+
+  function updateDebugDrawer() {
+    if (!ensureDebugDrawer() || !state.debugTextarea) {
+      return;
+    }
+    const previousScrollTop = state.debugTextarea.scrollTop;
+    const atBottom =
+      state.debugTextarea.scrollHeight - (state.debugTextarea.clientHeight + state.debugTextarea.scrollTop) <= 4;
+    state.debugTextarea.value = state.debugEntries.join('\n');
+    if (atBottom) {
+      state.debugTextarea.scrollTop = state.debugTextarea.scrollHeight;
+    } else {
+      state.debugTextarea.scrollTop = previousScrollTop;
+    }
+  }
+
+  function setDebugDrawerVisibility(visible) {
+    ensureDebugDrawer();
+    state.drawerVisible = Boolean(visible);
+    if (!state.debugDrawer) {
+      return;
+    }
+    state.debugDrawer.setAttribute('data-open', state.drawerVisible ? 'true' : 'false');
+    if (state.drawerVisible) {
+      state.debugDrawer.classList.add('is-open');
+    } else {
+      state.debugDrawer.classList.remove('is-open');
+    }
+    if (state.debugToggle) {
+      state.debugToggle.setAttribute('aria-expanded', state.drawerVisible ? 'true' : 'false');
+    }
+  }
+
+  function copyDebugLogs() {
+    ensureDebugDrawer();
+    if (!state.debugTextarea) {
+      return;
+    }
+    const text = state.debugTextarea.value || '';
+    if (!text) {
+      return;
+    }
+    const clipboard = global.navigator && global.navigator.clipboard;
+    if (clipboard && typeof clipboard.writeText === 'function') {
+      clipboard.writeText(text).catch(() => {
+        fallbackCopy(state.debugTextarea);
+      });
+      return;
+    }
+    fallbackCopy(state.debugTextarea);
+  }
+
+  function fallbackCopy(textarea) {
+    if (!textarea || typeof textarea.select !== 'function') {
+      return;
+    }
+    const active = doc && doc.activeElement;
+    const selection = {
+      start: typeof textarea.selectionStart === 'number' ? textarea.selectionStart : null,
+      end: typeof textarea.selectionEnd === 'number' ? textarea.selectionEnd : null,
+    };
+    textarea.focus();
+    textarea.select();
+    try {
+      if (doc && typeof doc.execCommand === 'function') {
+        doc.execCommand('copy');
+      }
+    } catch (error) {
+      /* noop */
+    }
+    if (typeof textarea.setSelectionRange === 'function') {
+      const start = selection.start === null ? textarea.value.length : selection.start;
+      const end = selection.end === null ? start : selection.end;
+      textarea.setSelectionRange(start, end);
+    }
+    if (active && typeof active.focus === 'function' && active !== textarea) {
+      active.focus();
+    }
+  }
+
   function pushStatus(tag, message, detail) {
     const timestamp = new Date();
     const text = typeof message === 'string' ? message : String(message);
@@ -154,7 +327,37 @@
     while (state.statuses.length > state.maxStatusEntries) {
       state.statuses.shift();
     }
+    appendDebugEntry(tag || 'BOOT', text, detail, timestamp);
     updateOverlay();
+  }
+
+  function appendDebugEntry(tag, message, detail, timestamp) {
+    const parts = [];
+    if (timestamp && typeof timestamp.toISOString === 'function') {
+      parts.push('[' + timestamp.toISOString() + ']');
+    }
+    parts.push('[' + tag + ']');
+    parts.push(message);
+    if (typeof detail !== 'undefined' && detail !== null) {
+      let rendered = '';
+      if (typeof detail === 'string') {
+        rendered = detail;
+      } else {
+        try {
+          rendered = JSON.stringify(detail);
+        } catch (error) {
+          rendered = String(detail);
+        }
+      }
+      if (rendered) {
+        parts.push('—', rendered);
+      }
+    }
+    state.debugEntries.push(parts.join(' '));
+    while (state.debugEntries.length > state.maxDebugEntries) {
+      state.debugEntries.shift();
+    }
+    updateDebugDrawer();
   }
 
   function logToConsole(tag, message, detail) {
