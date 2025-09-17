@@ -57,17 +57,26 @@
         console.error('[CFG][ERR] ' + message);
       }
 
-      const sw = typeof navigator !== 'undefined' && navigator && navigator.serviceWorker ? navigator.serviceWorker : null;
-      if (sw && sw.ready && typeof sw.ready.then === 'function') {
-        sw.ready
-          .then((registration) => {
-            if (registration && typeof registration.update === 'function') {
-              logDiagnostic('CFG', 'retry: requested service worker update');
-              return registration.update();
-            }
-            return null;
-          })
-          .catch(() => undefined);
+      const bootFlags =
+        Boot && Boot.flags && typeof Boot.flags === 'object' ? Boot.flags : null;
+      const debugMode = !!(bootFlags && bootFlags.debug);
+
+      if (!debugMode) {
+        const sw =
+          typeof navigator !== 'undefined' && navigator && navigator.serviceWorker
+            ? navigator.serviceWorker
+            : null;
+        if (sw && sw.ready && typeof sw.ready.then === 'function') {
+          sw.ready
+            .then((registration) => {
+              if (registration && typeof registration.update === 'function') {
+                logDiagnostic('CFG', 'retry: requested service worker update');
+                return registration.update();
+              }
+              return null;
+            })
+            .catch(() => undefined);
+        }
       }
 
       logDiagnostic('CFG', 'hint: Shift+Reload to bypass stale service worker');
