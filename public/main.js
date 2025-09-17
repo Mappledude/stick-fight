@@ -1,7 +1,3 @@
-if (!window.__FIREBASE_CONFIG__) {
-  throw new Error('CFG_MISSING: window.__FIREBASE_CONFIG__ not defined');
-}
-
 (function () {
   const Boot = (() => {
     if (typeof window !== 'undefined' && window.__StickFightBoot) {
@@ -24,6 +20,122 @@ if (!window.__FIREBASE_CONFIG__) {
   })();
 
   Boot.milestone('main-script');
+
+  const FIREBASE_CONFIG = Boot.guard('config-ready', () => {
+    const scope = typeof window !== 'undefined' ? window : typeof globalThis !== 'undefined' ? globalThis : {};
+    const rawConfig = scope && scope.__FIREBASE_CONFIG__;
+
+    const logDiagnostic = (tag, message) => {
+      if (Boot && typeof Boot.log === 'function') {
+        Boot.log(tag, message);
+      }
+      if (!Boot || Boot.version !== 1) {
+        if (typeof console !== 'undefined' && console && typeof console.info === 'function') {
+          console.info('[' + tag + '] ' + message);
+        }
+      }
+    };
+
+    const showConfigFailure = (reason, detail) => {
+      const message = detail ? reason + ' ' + detail : reason;
+      if (Boot && typeof Boot.ensureOverlay === 'function') {
+        Boot.ensureOverlay();
+      }
+      logDiagnostic('CFG', '[ERR] ' + reason);
+      if (detail) {
+        logDiagnostic('CFG', detail);
+      }
+      if (Boot && typeof Boot.error === 'function') {
+        Boot.error(new Error(message), 'CFG');
+      }
+      if (typeof console !== 'undefined' && console && typeof console.error === 'function') {
+        console.error('[CFG][ERR] ' + message);
+      }
+
+      const sw = typeof navigator !== 'undefined' && navigator && navigator.serviceWorker ? navigator.serviceWorker : null;
+      if (sw && sw.ready && typeof sw.ready.then === 'function') {
+        sw.ready
+          .then((registration) => {
+            if (registration && typeof registration.update === 'function') {
+              logDiagnostic('CFG', 'retry: requested service worker update');
+              return registration.update();
+            }
+            return null;
+          })
+          .catch(() => undefined);
+      }
+
+      logDiagnostic('CFG', 'hint: Shift+Reload to bypass stale service worker');
+
+      if (typeof document !== 'undefined' && document && typeof document.getElementById === 'function') {
+        const banner = document.getElementById('boot-overlay');
+        if (banner && banner.hasAttribute('hidden')) {
+          banner.removeAttribute('hidden');
+        }
+      }
+
+      return null;
+    };
+
+    if (!rawConfig || typeof rawConfig !== 'object') {
+      return showConfigFailure('missing firebase config');
+    }
+
+    const requiredKeys = ['apiKey', 'authDomain', 'projectId', 'appId'];
+    const missingKeys = [];
+    for (let i = 0; i < requiredKeys.length; i += 1) {
+      const key = requiredKeys[i];
+      const value = rawConfig[key];
+      if (typeof value !== 'string' || value.trim() === '') {
+        missingKeys.push(key);
+      }
+    }
+
+    if (missingKeys.length > 0) {
+      return showConfigFailure('invalid firebase config', 'missing=' + missingKeys.join('|'));
+    }
+
+    const origin = typeof location !== 'undefined' && location ? location.origin || location.href || 'unknown' : 'unknown';
+    const scriptNode = typeof document !== 'undefined' && document ? document.currentScript : null;
+    const scriptType = scriptNode && typeof scriptNode.type === 'string' && scriptNode.type ? scriptNode.type : 'classic';
+    const determineSdkFlavor = () => {
+      const firebaseNamespace = scope && scope.firebase ? scope.firebase : undefined;
+      if (!firebaseNamespace) {
+        return 'unloaded';
+      }
+      if (firebaseNamespace.SDK_VERSION) {
+        return 'firebase-js/' + firebaseNamespace.SDK_VERSION;
+      }
+      if (firebaseNamespace.apps && typeof firebaseNamespace.app === 'function') {
+        return 'firebase-js/compat';
+      }
+      if (typeof firebaseNamespace.initializeApp === 'function') {
+        return 'firebase-js/modular';
+      }
+      return 'firebase-js/unknown';
+    };
+
+    const sdkFlavor = determineSdkFlavor();
+
+    logDiagnostic('CFG', 'config-ready');
+    logDiagnostic('HOST', 'origin=' + origin + ' authDomain=' + rawConfig.authDomain);
+    logDiagnostic('INIT', 'script=' + scriptType + ' sdk=' + sdkFlavor);
+
+    return rawConfig;
+  });
+
+  if (!FIREBASE_CONFIG) {
+    if (Boot && typeof Boot.log === 'function') {
+      Boot.log('BOOT', 'config guard aborted');
+    }
+    if (!Boot || Boot.version !== 1) {
+      if (typeof console !== 'undefined' && console && typeof console.warn === 'function') {
+        console.warn('[BOOT] config guard aborted');
+      }
+    }
+    return;
+  }
+
   const BOOT_FLAGS = Boot && Boot.flags ? Boot.flags : { debug: false, safe: false, nofs: false, nolobby: false };
   Boot.milestone('boot-flags');
 
