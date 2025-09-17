@@ -684,9 +684,32 @@
       if (!pointer) {
         return { x: 0, y: 0 };
       }
-      const worldX = typeof pointer.worldX === 'number' ? pointer.worldX : pointer.x;
-      const worldY = typeof pointer.worldY === 'number' ? pointer.worldY : pointer.y;
-      return { x: worldX - this.x, y: worldY - this.y };
+      const hasScreenCoords =
+        typeof pointer.x === 'number' && Number.isFinite(pointer.x) &&
+        typeof pointer.y === 'number' && Number.isFinite(pointer.y);
+
+      if (hasScreenCoords) {
+        return { x: pointer.x - this.x, y: pointer.y - this.y };
+      }
+
+      const hasWorldCoords =
+        typeof pointer.worldX === 'number' && Number.isFinite(pointer.worldX) &&
+        typeof pointer.worldY === 'number' && Number.isFinite(pointer.worldY);
+
+      if (hasWorldCoords) {
+        const camera =
+          (pointer.camera && typeof pointer.camera.scrollX === 'number' ? pointer.camera : null) ||
+          (this.scene && this.scene.cameras && this.scene.cameras.main
+            ? this.scene.cameras.main
+            : null);
+        const scrollX = camera && typeof camera.scrollX === 'number' ? camera.scrollX : 0;
+        const scrollY = camera && typeof camera.scrollY === 'number' ? camera.scrollY : 0;
+        const screenX = pointer.worldX - scrollX;
+        const screenY = pointer.worldY - scrollY;
+        return { x: screenX - this.x, y: screenY - this.y };
+      }
+
+      return { x: 0, y: 0 };
     }
 
     updateFromPointer(pointer) {
