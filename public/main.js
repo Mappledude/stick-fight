@@ -5355,17 +5355,34 @@ if (typeof this.positionNetDiagOverlay === 'function') {
       }
     }
 
-    renderRemotePlayers(players) {
+    renderRemotePlayers(players, options = {}) {
       const list = Array.isArray(players) ? players : [];
       if (!this.remotePlayerLabels) {
         this.remotePlayerLabels = new Map();
       }
+      if (!this.remoteFighters) {
+        this.remoteFighters = new Map();
+      }
+      if (!this.remoteControlledSlots) {
+        this.remoteControlledSlots = new Set();
+      }
+      if (options && options.playArea) {
+        this.applyRemotePlayArea(options.playArea);
+      }
+
+      const activeRemoteSlots = new Set();
       const seen = new Set();
       list.forEach((player) => {
         if (!player || !player.id) {
           return;
         }
         seen.add(player.id);
+        const slot = typeof player.slot === 'string' ? player.slot : null;
+        if (slot) {
+          activeRemoteSlots.add(slot);
+        }
+        this.updateRemotePlayerActor(player);
+
         let label = this.remotePlayerLabels.get(player.id);
         if (!label) {
           if (!this.add || typeof this.add.text !== 'function') {
@@ -5390,11 +5407,176 @@ if (typeof this.positionNetDiagOverlay === 'function') {
         label.setPosition(x, y - 46);
         label.setVisible(true);
       });
+
       this.remotePlayerLabels.forEach((label, id) => {
         if (!seen.has(id)) {
           label.setVisible(false);
         }
       });
+
+      this.remoteFighters.forEach((fighter, id) => {
+        if (!seen.has(id) && fighter) {
+          fighter.setVisible(false);
+        }
+      });
+
+      if (this.remoteControlledSlots) {
+        this.remoteControlledSlots.forEach((slot) => {
+          if (!activeRemoteSlots.has(slot)) {
+            this.releaseRemoteControlledSlot(slot);
+          }
+        });
+        this.remoteControlledSlots = activeRemoteSlots;
+      } else {
+        this.remoteControlledSlots = activeRemoteSlots;
+      }
+    }
+
+    updateRemotePlayerActor(player) {
+      if (!player || !player.id) {
+        return;
+      }
+      const slot = typeof player.slot === 'string' ? player.slot : null;
+      const fighter = this.getFighterForSlot(slot);
+      if (fighter) {
+        this.markFighterAsRemoteControlled(fighter, slot);
+        this.writeSnapshotToFighter(fighter, player);
+        return;
+      }
+
+      let ghost = this.remoteFighters.get(player.id);
+      if (!ghost || !ghost.scene) {
+        ghost = this.createRemoteGhostFighter(player);
+        if (!ghost) {
+          return;
+        }
+        this.remoteFighters.set(player.id, ghost);
+      }
+      this.writeSnapshotToFighter(ghost, player);
+    }
+
+    getFighterForSlot(slot) {
+      if (!slot) {
+        return null;
+      }
+      const fighters = Array.isArray(this._fighters) ? this._fighters : [];
+      if (slot === 'p1') {
+        return fighters[0] || null;
+      }
+      if (slot === 'p2') {
+        return fighters[1] || null;
+      }
+      return null;
+    }
+
+    markFighterAsRemoteControlled(fighter, slot) {
+      if (!fighter) {
+        return;
+      }
+      if (this.remoteControlledSlots) {
+        this.remoteControlledSlots.add(slot);
+      }
+      fighter.isRemoteReplica = true;
+      const body = fighter.body ? /** @type {Phaser.Physics.Arcade.Body} */ (fighter.body) : null;
+      if (body) {
+        body.enable = false;
+        if (typeof body.setAllowGravity === 'function') {
+          body.setAllowGravity(false);
+        } else {
+          body.allowGravity = false;
+        }
+        body.moves = false;
+        if (typeof body.setVelocity === 'function') {
+          body.setVelocity(0, 0);
+        }
+      }
+    }
+
+    releaseRemoteControlledSlot(slot) {
+      if (!slot) {
+        return;
+      }
+      const fighter = this.getFighterForSlot(slot);
+      if (!fighter) {
+        return;
+      }
+      fighter.isRemoteReplica = false;
+      const body = fighter.body ? /** @type {Phaser.Physics.Arcade.Body} */ (fighter.body) : null;
+      if (body) {
+        body.enable = true;
+        if (typeof body.setAllowGravity === 'function') {
+          body.setAllowGravity(true);
+        } else {
+          body.allowGravity = true;
+        }
+        body.moves = true;
+      }
+    }
+
+    createRemoteGhostFighter(player) {
+      if (!this.add) {
+        return null;
+      }
+      const slot = typeof player.slot === 'string' ? player.slot : null;
+      const color = slot === 'p2' ? 0xff3b30 : 0x4cd964;
+      const ghost = new Stick(this, 0, 0, { facing: 1, color });
+      ghost.setDepth(10);
+      const body = ghost.body ? /** @type {Phaser.Physics.Arcade.Body} */ (ghost.body) : null;
+      if (body) {
+        body.enable = false;
+        if (typeof body.setAllowGravity === 'function') {
+          body.setAllowGravity(false);
+        } else {
+          body.allowGravity = false;
+        }
+        body.moves = false;
+      }
+      return ghost;
+    }
+
+    writeSnapshotToFighter(fighter, player) {
+      if (!fighter || !player) {
+        return;
+      }
+      const x = Number.isFinite(player.x) ? player.x : fighter.x;
+      const y = Number.isFinite(player.y) ? player.y : fighter.y;
+      if (typeof fighter.setPosition === 'function') {
+        fighter.setPosition(x, y);
+      } else {
+        fighter.x = x;
+        fighter.y = y;
+      }
+      if (typeof fighter.setFacing === 'function') {
+        fighter.setFacing(player.facing === -1 ? -1 : 1);
+      }
+      if (Number.isFinite(player.hp)) {
+        fighter.hp = player.hp;
+      }
+      if (typeof fighter.setVisible === 'function') {
+        fighter.setVisible(true);
+      }
+      if (typeof fighter.setAlpha === 'function') {
+        fighter.setAlpha(1);
+      }
+    }
+
+    applyRemotePlayArea(playArea) {
+      if (!playArea || typeof playArea !== 'object') {
+        return;
+      }
+      const x = Number.isFinite(playArea.x) ? playArea.x : 0;
+      const y = Number.isFinite(playArea.y) ? playArea.y : 0;
+      const w = Number.isFinite(playArea.w) ? playArea.w : 0;
+      const h = Number.isFinite(playArea.h) ? playArea.h : 0;
+      this.playArea = { x, y, w, h };
+      if (this.physics && this.physics.world) {
+        this.physics.world.setBounds(x, y, w, h, true, true, true, true);
+      }
+      if (this.cameras && this.cameras.main) {
+        this.cameras.main.setBounds(x, y, w, h);
+      }
+      this.updatePlayAreaBorder();
+      this.updatePlayAreaDiagnostics(true);
     }
 
     clearRemotePlayerLabels() {
@@ -5407,6 +5589,23 @@ if (typeof this.positionNetDiagOverlay === 'function') {
         }
       });
       this.remotePlayerLabels.clear();
+      this.clearRemoteFighters();
+      if (this.remoteControlledSlots) {
+        this.remoteControlledSlots.forEach((slot) => this.releaseRemoteControlledSlot(slot));
+        this.remoteControlledSlots.clear();
+      }
+    }
+
+    clearRemoteFighters() {
+      if (!this.remoteFighters) {
+        return;
+      }
+      this.remoteFighters.forEach((fighter) => {
+        if (fighter && typeof fighter.destroy === 'function') {
+          fighter.destroy();
+        }
+      });
+      this.remoteFighters.clear();
     }
 
     clearNetworkMomentaryFlags(slot) {
@@ -5426,12 +5625,23 @@ if (typeof this.positionNetDiagOverlay === 'function') {
       return fighters.map((fighter, index) => {
         const slot = index === 0 ? 'p1' : 'p2';
         if (!fighter) {
-          return { slot, x: 0, y: 0, hp: 100 };
+          return { slot, x: 0, y: 0, vx: 0, vy: 0, hp: 100, facing: 1, onGround: true };
         }
         const hp = typeof fighter.hp === 'number' && Number.isFinite(fighter.hp) ? fighter.hp : 100;
         const x = typeof fighter.x === 'number' && Number.isFinite(fighter.x) ? fighter.x : 0;
         const y = typeof fighter.y === 'number' && Number.isFinite(fighter.y) ? fighter.y : 0;
-        return { slot, x, y, hp };
+        const body = fighter.body ? /** @type {Phaser.Physics.Arcade.Body} */ (fighter.body) : null;
+        const velocity = body && body.velocity ? body.velocity : null;
+        const vx = velocity && Number.isFinite(velocity.x) ? velocity.x : 0;
+        const vy = velocity && Number.isFinite(velocity.y) ? velocity.y : 0;
+        const bodyOnFloor =
+          body && typeof body.onFloor === 'function' ? body.onFloor.call(body) : false;
+        const onGround = !!(
+          body &&
+          ((body.blocked && body.blocked.down) || (body.touching && body.touching.down) || bodyOnFloor)
+        );
+        const facing = fighter.facing === -1 ? -1 : 1;
+        return { slot, x, y, vx, vy, hp, facing, onGround };
       });
     }
 

@@ -3,7 +3,7 @@
 
   const PROTOCOL_VERSION = 1;
   const INPUT_SEND_INTERVAL_MS = 50;
-  const STATE_SEND_INTERVAL_MS = 150;
+  const STATE_SEND_INTERVAL_MS = 120;
   const INPUT_STALE_MS = 1500;
   const DIAG_UPDATE_INTERVAL_MS = 250;
   const RATE_LOG_INTERVAL_MS = 5000;
@@ -25,11 +25,16 @@
     connections: new Map(),
     peerInputs: {},
     remotePlayers: [],
-    registry: null,
+// Netplay runtime fields (merged)
+this.registry = (typeof this.registry !== 'undefined') ? this.registry : null;        // from main
+this.remotePlayArea = (typeof this.remotePlayArea !== 'undefined') ? this.remotePlayArea : null;  // from 4d
+
     lastInputSentAt: null,
     lastInputReceivedAt: null,
     lastStateBroadcastAt: null,
     lastStateReceivedAt: null,
+    lastStateTimestamp: null,
+    lastSnapshotLatencyMs: null,
     diagTimer: null,
     unsubPlayers: null,
     guestSessionUnsub: null,
@@ -362,7 +367,9 @@
       if (runtime.lastInputSentAt) {
         inputAge = now - runtime.lastInputSentAt;
       }
-      if (runtime.lastStateReceivedAt) {
+      if (Number.isFinite(runtime.lastSnapshotLatencyMs)) {
+        stateAge = runtime.lastSnapshotLatencyMs;
+      } else if (runtime.lastStateReceivedAt) {
         stateAge = now - runtime.lastStateReceivedAt;
       }
     } else if (runtime.role === 'host') {
@@ -782,39 +789,54 @@ if (
 
   function buildStateSnapshot() {
     if (!runtime.scene || typeof runtime.scene.getFighterSnapshots !== 'function') {
-      return [];
+      return { players: [], play: null };
     }
     const fighters = runtime.scene.getFighterSnapshots();
-    if (!Array.isArray(fighters)) {
-      return [];
-    }
-    return fighters
-      .map((fighter) => {
-        if (!fighter || !fighter.slot) {
-          return null;
+    const playArea = runtime.scene.playArea || null;
+    const players = Array.isArray(fighters)
+      ? fighters
+          .map((fighter) => {
+            if (!fighter || !fighter.slot) {
+              return null;
+            }
+            const peerId = runtime.slotAssignments[fighter.slot];
+            if (!peerId) {
+              return null;
+            }
+            return {
+              id: peerId,
+              slot: fighter.slot,
+              name: getPlayerName(peerId),
+              x: Number.isFinite(fighter.x) ? fighter.x : 0,
+              y: Number.isFinite(fighter.y) ? fighter.y : 0,
+              vx: Number.isFinite(fighter.vx) ? fighter.vx : 0,
+              vy: Number.isFinite(fighter.vy) ? fighter.vy : 0,
+              hp: Number.isFinite(fighter.hp) ? fighter.hp : 100,
+              facing: fighter.facing === -1 ? -1 : 1,
+              onGround: !!fighter.onGround,
+            };
+          })
+          .filter(Boolean)
+      : [];
+    const play = playArea
+      ? {
+          x: Number.isFinite(playArea.x) ? playArea.x : 0,
+          y: Number.isFinite(playArea.y) ? playArea.y : 0,
+          w: Number.isFinite(playArea.w) ? playArea.w : 0,
+          h: Number.isFinite(playArea.h) ? playArea.h : 0,
         }
-        const peerId = runtime.slotAssignments[fighter.slot];
-        if (!peerId) {
-          return null;
-        }
-        return {
-          id: peerId,
-          name: getPlayerName(peerId),
-          x: Number.isFinite(fighter.x) ? fighter.x : 0,
-          y: Number.isFinite(fighter.y) ? fighter.y : 0,
-          hp: Number.isFinite(fighter.hp) ? fighter.hp : 100,
-        };
-      })
-      .filter(Boolean);
+      : null;
+    return { players, play };
   }
 
   function broadcastHostState() {
-    const players = buildStateSnapshot();
+    const snapshot = buildStateSnapshot();
+    const players = snapshot.players || [];
     if (!players.length) {
       return;
     }
     const now = nowMs();
-    const message = { t: Math.floor(Date.now()), players };
+    const message = { t: Math.floor(Date.now()), players, play: snapshot.play };
     const serialized = serializeJSON(message);
     if (!serialized) {
       return;
@@ -1030,13 +1052,54 @@ if (
       if (!payload || !Array.isArray(payload.players)) {
         return;
       }
-      runtime.remotePlayers = payload.players.filter((player) => player && player.id !== runtime.localPeerId);
+      const sanitizedPlayers = payload.players
+        .map((player) => {
+          if (!player || typeof player !== 'object') {
+            return null;
+          }
+          const id = typeof player.id === 'string' ? player.id : null;
+          if (!id) {
+            return null;
+          }
+          return {
+            id,
+            slot: typeof player.slot === 'string' ? player.slot : null,
+            name: typeof player.name === 'string' ? player.name : '',
+            x: Number.isFinite(player.x) ? player.x : 0,
+            y: Number.isFinite(player.y) ? player.y : 0,
+            vx: Number.isFinite(player.vx) ? player.vx : 0,
+            vy: Number.isFinite(player.vy) ? player.vy : 0,
+            hp: Number.isFinite(player.hp) ? player.hp : 100,
+            facing: player.facing === -1 ? -1 : 1,
+            onGround: !!player.onGround,
+          };
+        })
+        .filter((player) => player && player.id !== runtime.localPeerId);
+      runtime.remotePlayers = sanitizedPlayers;
       const now = nowMs();
       runtime.lastStateReceivedAt = now;
       connection.statePacketsWindow += 1;
       connection.lastStateReceivedAt = now;
-      if (runtime.scene && typeof runtime.scene.renderRemotePlayers === 'function') {
-        runtime.scene.renderRemotePlayers(runtime.remotePlayers);
+      const timestamp = typeof payload.t === 'number' ? payload.t : null;
+      runtime.lastStateTimestamp = timestamp;
+      runtime.lastSnapshotLatencyMs = Number.isFinite(timestamp) ? Math.max(Date.now() - timestamp, 0) : null;
+      const playArea = payload.play;
+      runtime.remotePlayArea =
+        playArea && typeof playArea === 'object'
+          ? {
+              x: Number.isFinite(playArea.x) ? playArea.x : 0,
+              y: Number.isFinite(playArea.y) ? playArea.y : 0,
+              w: Number.isFinite(playArea.w) ? playArea.w : 0,
+              h: Number.isFinite(playArea.h) ? playArea.h : 0,
+            }
+          : null;
+      if (runtime.scene) {
+        if (typeof runtime.scene.applyRemotePlayArea === 'function') {
+          runtime.scene.applyRemotePlayArea(runtime.remotePlayArea);
+        }
+        if (typeof runtime.scene.renderRemotePlayers === 'function') {
+          runtime.scene.renderRemotePlayers(runtime.remotePlayers, { playArea: runtime.remotePlayArea });
+        }
       }
       updateDiagnosticsOverlay();
     };
@@ -1154,7 +1217,10 @@ if (
     }
     runtime.registry = null;
     runtime.remotePlayers = [];
+    runtime.remotePlayArea = null;
     runtime.peerInputs = {};
+    runtime.lastStateTimestamp = null;
+    runtime.lastSnapshotLatencyMs = null;
     updateDiagnosticsOverlay();
   }
 
