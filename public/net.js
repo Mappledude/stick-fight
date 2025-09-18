@@ -288,6 +288,66 @@ function ensureAuthReady() {
   return ensureSignedInUser().then(() => undefined);
 }
 
+  let lastEnsureAppAndUserMeta = null;
+
+  async function ensureAppAndUser() {
+    if (NETWORK_DISABLED) {
+      throw new Error('Networking disabled by query flags.');
+    }
+    if (!FirebaseBootstrap || typeof FirebaseBootstrap.initFirebase !== 'function') {
+      throw new Error('Firebase bootstrap helper unavailable.');
+    }
+    if (typeof FirebaseBootstrap.ensureSignedInUser !== 'function') {
+      throw new Error('Firebase bootstrap helper unavailable.');
+    }
+
+    const firebase = firebaseNamespace();
+    const appsBefore = firebase && firebase.apps ? firebase.apps.length : 0;
+    const app = FirebaseBootstrap.initFirebase();
+    if (!firebaseAppInstance) {
+      firebaseAppInstance = app;
+    }
+    const result = await FirebaseBootstrap.ensureSignedInUser();
+    const auth = result && result.auth ? result.auth : null;
+    const user = result && result.user ? result.user : null;
+    const firebaseAfter = firebaseNamespace();
+    const appsAfter = firebaseAfter && firebaseAfter.apps ? firebaseAfter.apps.length : appsBefore;
+    lastEnsureAppAndUserMeta = {
+      appsBefore,
+      appsAfter,
+    };
+    return { app, auth, user };
+  }
+
+  const logAppAndUserGuard = (guardResult) => {
+    if (!guardResult) {
+      return;
+    }
+    const meta = lastEnsureAppAndUserMeta || {};
+    const firebase = firebaseNamespace();
+    const appsAfter =
+      typeof meta.appsAfter === 'number'
+        ? meta.appsAfter
+        : firebase && firebase.apps
+        ? firebase.apps.length
+        : 0;
+    const reused =
+      typeof meta.appsBefore === 'number'
+        ? meta.appsBefore > 0
+          ? 'yes'
+          : 'no'
+        : appsAfter > 1
+        ? 'yes'
+        : appsAfter > 0
+        ? 'no'
+        : 'unknown';
+    bootLog('INIT', `sdk=compat scriptType=classic appInitRequested=yes reusedApp=${reused} apps=${appsAfter}`);
+    const auth = guardResult.auth || null;
+    const user = guardResult.user || (auth && auth.currentUser) || null;
+    const uid = user && user.uid ? user.uid : 'missing';
+    bootLog('AUTH', `uid=${uid}`);
+  };
+
   const ADMIN_CLAIM_KEYS = ['admin', 'stickfightAdmin'];
 
   const claimsContainAdmin = (claims) => {
@@ -567,32 +627,46 @@ function ensureAuthReady() {
         lastSeenAt: getServerTimestamp(),
       });
     });
-    const metadataUpdate = {
-      hostPeerId,
-      hostUid,
-      playerCount: 1,
-      updatedAt: getServerTimestamp(),
-      lastActivityAt: getServerTimestamp(),
-    };
-    try {
-      await roomRef.set(metadataUpdate, { merge: true });
-    } catch (error) {
-      logMessage('[ROOM]', `failed to update metadata for code=${roomId}`, error);
-    }
-    try {
-      await playersRef.set(
-        {
-          peerId: hostPeerId,
-          role: 'host',
-          isHost: true,
-          name: resolvedName,
-        },
-        { merge: true }
-      );
-    } catch (error) {
-      logMessage('[ROOM]', `failed to update host player metadata code=${roomId}`, error);
-    }
-    logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`);
+// --- room metadata (host + activity) ---
+const nowTs = typeof getServerTimestamp === 'function' ? getServerTimestamp() : getTimestampValue();
+const metadataUpdate = {
+  hostPeerId,
+  hostUid,
+  playerCount: 1,
+  updatedAt: nowTs,
+  lastActivityAt: nowTs,
+  // keep existing fields like status/active/maxPlayers elsewhere in your flow
+};
+
+try {
+  await roomRef.set(metadataUpdate, { merge: true });
+} catch (error) {
+  logMessage('[ROOM]', `failed to update metadata for code=${roomId}`, error);
+}
+
+// --- host player document (claim + identity) ---
+try {
+  await playersRef.set(
+    {
+      uid: hostUid,
+      deviceId: typeof getDeviceId === 'function' ? getDeviceId() : deviceId,
+      peerId: hostPeerId,
+      role: 'host',
+      isHost: true,
+      name: resolvedName,
+      nick: resolvedName,
+      joinedAt: nowTs,
+      lastSeenAt: nowTs,
+      hp: 100,
+    },
+    { merge: true }
+  );
+} catch (error) {
+  logMessage('[ROOM]', `failed to update host player metadata code=${roomId}`, error);
+}
+
+logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`);
+
     return {
       roomId,
       hostPeerId,
@@ -603,8 +677,12 @@ function ensureAuthReady() {
 
   const createRoom = async (options) => {
     logConfigScope('room-create');
-    await ensureAuthReady();
-    const { auth, user } = await ensureSignedInUser();
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      guardResult = await ensureAppAndUser();
+      logAppAndUserGuard(guardResult);
+    }
+    const { auth, user } = guardResult || (await ensureSignedInUser());
     const currentUser = user || (auth && auth.currentUser);
     if (!currentUser || !currentUser.uid) {
       throw new Error('Unable to determine the authenticated user.');
@@ -622,6 +700,8 @@ function ensureAuthReady() {
     netState.shareUrl = shareUrl;
     netState.initialized = true;
 
+    logMessage('[ROOM]', `created id=${roomId} code=${roomId}`);
+
     emitEvent('roomCreated', {
       roomId,
       hostPeerId,
@@ -634,9 +714,13 @@ function ensureAuthReady() {
 
   const joinRoom = async (roomId, options) => {
     logConfigScope('room-join');
-    await ensureAuthReady();
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      guardResult = await ensureAppAndUser();
+      logAppAndUserGuard(guardResult);
+    }
     const firestore = ensureFirestore();
-    const { auth, user } = await ensureSignedInUser();
+    const { auth, user } = guardResult || (await ensureSignedInUser());
     const currentUser = user || (auth && auth.currentUser);
     if (!currentUser || !currentUser.uid) {
       throw new Error('Unable to determine the authenticated user.');
@@ -719,7 +803,7 @@ function ensureAuthReady() {
     netState.shareUrl = buildShareUrl(trimmedRoomId);
     netState.initialized = true;
 
-    logMessage('[ROOM]', `joined code=${trimmedRoomId} uid=${currentUser.uid} name=${resolvedName}${alreadyPresent ? ' (rejoin)' : ''}`);
+    logMessage('[ROOM]', `joined code=${trimmedRoomId} uid=${currentUser.uid} name=${resolvedName}`);
 
     emitEvent('roomJoined', {
       roomId: trimmedRoomId,
@@ -764,7 +848,13 @@ function ensureAuthReady() {
     if (!user || !user.uid) {
       throw new Error('Admin privileges are required.');
     }
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      guardResult = await ensureAppAndUser();
+      logAppAndUserGuard(guardResult);
+    }
     const record = await createRoomRecord({ hostUid: user.uid, hostName: 'Admin' });
+    logMessage('[ROOM]', `created id=${record.roomId} code=${record.roomId}`);
     return {
       roomId: record.roomId,
       hostPeerId: record.hostPeerId,
@@ -778,6 +868,11 @@ function ensureAuthReady() {
       throw new Error('Room code is required.');
     }
     await ensureAdminPrivileges();
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      guardResult = await ensureAppAndUser();
+      logAppAndUserGuard(guardResult);
+    }
     const firestore = ensureFirestore();
     const roomRef = firestore.collection('rooms').doc(trimmed);
     const snapshot = await roomRef.get();
@@ -790,6 +885,11 @@ function ensureAuthReady() {
 
   const adminDeleteAllRooms = async () => {
     await ensureAdminPrivileges();
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      guardResult = await ensureAppAndUser();
+      logAppAndUserGuard(guardResult);
+    }
     const firestore = ensureFirestore();
     const roomsSnapshot = await firestore.collection('rooms').get();
     const docs = roomsSnapshot.docs || [];
@@ -883,6 +983,7 @@ function ensureAuthReady() {
     lobbyRoomsState.rooms = processed;
     updateRoomsTable();
     logMessage('[LOBBY]', `rooms=${processed.length}`);
+    return processed.length;
   };
 
   const startLobbyRoomsListener = async () => {
@@ -891,6 +992,16 @@ function ensureAuthReady() {
       return;
     }
     lobbyRoomsState.listening = true;
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      try {
+        guardResult = await ensureAppAndUser();
+        logAppAndUserGuard(guardResult);
+      } catch (error) {
+        logMessage('[LOBBY]', 'failed to initialize firebase app/user for lobby rooms', error);
+        return;
+      }
+    }
     try {
       await ensureAuthReady();
     } catch (error) {
@@ -903,10 +1014,19 @@ function ensureAuthReady() {
         .collection('rooms')
         .where('status', '==', 'open')
         .where('active', '==', true);
+      logMessage('[LOBBY]', 'attach-listener');
+      let firstSnapshotLogged = false;
       lobbyRoomsState.unsubscribe = query.onSnapshot(
         (snapshot) => {
           Promise.resolve()
             .then(() => refreshRoomsFromSnapshot(snapshot))
+            .then((count) => {
+              if (!firstSnapshotLogged) {
+                const resolvedCount = typeof count === 'number' ? count : lobbyRoomsState.rooms.length;
+                logMessage('[LOBBY]', `rooms=${resolvedCount} first-snapshot`);
+                firstSnapshotLogged = true;
+              }
+            })
             .catch((error) => {
               logMessage('[LOBBY]', 'failed to process rooms snapshot', error);
             });
@@ -1005,6 +1125,7 @@ function ensureAuthReady() {
     const createButton = overlayState.panel.querySelector('#stickfight-admin-create-room');
     if (createButton) {
       createButton.addEventListener('click', async () => {
+        logMessage('[ADMIN]', 'create-room click');
         createButton.disabled = true;
         setStatus('Creating room...');
         try {
@@ -1049,6 +1170,7 @@ function ensureAuthReady() {
           setStatus('Type DELETE ALL to confirm.');
           return;
         }
+        logMessage('[ADMIN]', 'delete-all click');
         setStatus('Deleting all rooms...');
         try {
           const count = await adminDeleteAllRooms();
@@ -1390,6 +1512,7 @@ function ensureAuthReady() {
         return;
       }
       busy = true;
+      logMessage('[ROOM]', 'create click');
       errorEl.textContent = '';
       submitButton.disabled = true;
       const name = nameInput ? nameInput.value.trim() : '';
@@ -1527,6 +1650,7 @@ function ensureAuthReady() {
         return;
       }
       busy = true;
+      logMessage('[ROOM]', `join click code=${roomId}`);
       errorEl.textContent = '';
       submitButton.disabled = true;
       const name = nameInput ? nameInput.value.trim() : '';
@@ -1653,6 +1777,7 @@ function ensureAuthReady() {
     ensureAuth,
     ensureSignedInUser,
     ensureAuthReady,
+    ensureAppAndUser,
     createRoom,
     joinRoom,
     buildShareUrl,
