@@ -2,17 +2,13 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
-    function isSignedIn() {
+    function isAuthed() {
       return request.auth != null;
     }
 
     function isAdmin() {
-      return isSignedIn() &&
+      return isAuthed() &&
         (request.auth.token.admin == true || request.auth.token.stickfightAdmin == true);
-    }
-
-    function playerDocBefore(roomId, uid) {
-      return get(/databases/$(db)/documents/rooms/$(roomId)/players/$(uid));
     }
 
     function playerDocAfter(roomId, uid) {
@@ -20,14 +16,8 @@ service cloud.firestore {
     }
 
     function isRoomMember(roomId) {
-      return isSignedIn() &&
+      return isAuthed() &&
         (request.auth.uid != null ? playerDocAfter(roomId, request.auth.uid).exists : false);
-    }
-
-    function ownsSignal(roomId, peerId) {
-      return isSignedIn() && request.auth.uid != null &&
-        (let player = playerDocAfter(roomId, request.auth.uid);
-          player.exists && player.data.peerId == peerId);
     }
 
     function roomWriteHasOnlyAllowedFields() {
@@ -57,25 +47,16 @@ service cloud.firestore {
       ]);
     }
 
-    function signalWriteHasOnlyAllowedFields() {
-      return request.resource.data.keys().hasOnly([
-        'role',
-        'offer',
-        'answer',
-        'ice',
-        'updatedAt'
-      ]);
-    }
-
     match /rooms/{roomId} {
-      allow read: if isSignedIn() || isAdmin();
+      allow read: if true;
 
-      allow create: if isSignedIn() &&
+      allow create: if isAuthed() &&
         roomWriteHasOnlyAllowedFields() &&
         request.resource.data.code == roomId &&
         request.resource.data.hostUid == request.auth.uid;
 
-      allow update: if roomWriteHasOnlyAllowedFields() &&
+      allow update: if isAuthed() &&
+        roomWriteHasOnlyAllowedFields() &&
         request.resource.data.code == roomId &&
         request.resource.data.createdAt == resource.data.createdAt &&
         request.resource.data.hostUid == resource.data.hostUid &&
@@ -84,34 +65,22 @@ service cloud.firestore {
           (isRoomMember(roomId) && roomUpdateHasOnlyAllowedChanges())
         );
 
-      allow delete: if isAdmin() ||
-        (isSignedIn() && resource.data.hostUid == request.auth.uid);
+      allow delete: if isAdmin();
 
       match /players/{uid} {
         allow read: if true;
 
         allow create, update: if (
-            isSignedIn() &&
+            isAuthed() &&
             request.auth.uid == uid &&
-            request.resource.data.uid == uid &&
-            (
-              !playerDocBefore(roomId, uid).exists ||
-              playerDocBefore(roomId, uid).data.deviceId == request.resource.data.deviceId
-            )
-          ) || isAdmin();
+            request.resource.data.uid == uid
+          ) || (isAdmin() && request.resource.data.uid == uid);
 
-        allow delete: if (isSignedIn() && request.auth.uid == uid) || isAdmin();
+        allow delete: if (isAuthed() && request.auth.uid == uid) || isAdmin();
       }
 
       match /signals/{peerId} {
-        allow read: if isAdmin() || isRoomMember(roomId);
-
-        allow create, update: if (
-            isAdmin() ||
-            (isRoomMember(roomId) && ownsSignal(roomId, peerId))
-          ) && signalWriteHasOnlyAllowedFields();
-
-        allow delete: if isAdmin() || (isRoomMember(roomId) && ownsSignal(roomId, peerId));
+        allow read, write: if isAuthed();
       }
     }
   }
