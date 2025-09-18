@@ -36,8 +36,15 @@ export function startRenderer(options: RendererOptions): StopRenderer {
     const y = Math.round(player.y);
     context.save();
     context.translate(x, y);
-    context.strokeStyle = player.color || '#37A9FF';
+    context.strokeStyle = '#ffffff';
     context.lineWidth = player.uid === selfUid ? 3 : 2;
+
+    context.beginPath();
+    context.moveTo(-2, 0);
+    context.lineTo(2, 0);
+    context.moveTo(0, -2);
+    context.lineTo(0, 2);
+    context.stroke();
 
     context.beginPath();
     context.arc(0, -14, 6, 0, Math.PI * 2);
