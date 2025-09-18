@@ -10,7 +10,12 @@ const RATE_LIMIT_MAX_CALLS = 5;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const rateLimitBuckets = new Map<string, number[]>();
 
-const allowedOriginPatterns = [/^https:\/\/([^.]+\.)*web\.app$/i, /^https:\/\/([^.]+\.)*firebaseapp\.com$/i];
+const allowedOrigins = new Set([
+  'https://stick-fight-pigeon.web.app',
+  'https://stick-fight-pigeon.firebaseapp.com',
+]);
+
+const ADMIN_CODE = '808080';
 
 type RawRequest = {
   get(header: string): string | undefined;
@@ -39,11 +44,7 @@ const getRequestIp = (context: CallableContextWithRequest): string => {
 };
 
 const assertAllowedOrigin = (origin: string | undefined): void => {
-  if (!origin) {
-    throw new functions.https.HttpsError('permission-denied', 'Missing origin header.');
-  }
-
-  if (!allowedOriginPatterns.some((pattern) => pattern.test(origin))) {
+  if (!origin || !allowedOrigins.has(origin)) {
     throw new functions.https.HttpsError('permission-denied', 'Origin not allowed.');
   }
 };
@@ -72,17 +73,18 @@ type CallableResponse = {
 
 export const grantAdminByCode = functions.https.onCall(async (data: GrantAdminRequest, context: functions.https.CallableContext) => {
   const callableContext = context as CallableContextWithRequest;
-  const origin = getRequestOrigin(callableContext);
-  assertAllowedOrigin(origin);
-
   const ip = getRequestIp(callableContext);
   enforceRateLimit(ip);
 
   if (!context.auth) {
-    throw new functions.https.HttpsError('unauthenticated', 'Authentication is required.');
+    throw new functions.https.HttpsError('unauthenticated', 'Sign in required.');
   }
 
-  if (data?.code !== '808080') {
+  const origin = getRequestOrigin(callableContext);
+  assertAllowedOrigin(origin);
+
+  const requestCode = typeof data?.code === 'string' ? data.code.trim() : undefined;
+  if (requestCode !== ADMIN_CODE) {
     throw new functions.https.HttpsError('permission-denied', 'Invalid code.');
   }
 

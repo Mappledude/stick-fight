@@ -1219,100 +1219,58 @@ await withFirestoreErrorHandling('listen', async () => {
       renderAdminPanel();
       return;
     }
-    const promptFn = typeof window !== 'undefined' && typeof window.prompt === 'function' ? window.prompt : null;
-    const alertFn = typeof window !== 'undefined' && typeof window.alert === 'function' ? window.alert : null;
-    const code = promptFn ? promptFn('Enter admin code') : null;
-    const trimmedCode = typeof code === 'string' ? code.trim() : '';
-    if (code !== null) {
-      logMessage('[ADMIN]', 'code-entered');
-    }
-    if (trimmedCode === '808080') {
-      try {
-        overlayState.adminOverride = true;
-        await ensureAdminPrivileges({ forceRefresh: true });
-        overlayState.isAdmin = true;
-        const overrideAllowed = !!bootFlags && !!bootFlags.debug;
-        overlayState.adminOverride = overrideAllowed;
-        if (!overrideAllowed) {
-          logMessage('[ADMIN]', 'entered');
-        }
-        renderAdminPanel();
-      } catch (error) {
-        overlayState.isAdmin = false;
-        overlayState.adminOverride = false;
-        const message = error && error.message ? error.message : 'Failed to verify admin access.';
-        logMessage('[ADMIN]', 'entry-denied', error);
-        if (alertFn) {
-          alertFn(message);
-        }
+
+    try {
+      const { auth, user } = await ensureSignedInUser();
+      const activeAuth = auth || ensureAuth();
+      const currentUser = user || (activeAuth && activeAuth.currentUser) || null;
+      if (!currentUser) {
+        throw new Error('Sign in required.');
       }
-    } else if (trimmedCode) {
-      if (bootFlags && bootFlags.safe) {
-        if (alertFn) {
-          alertFn('Invalid admin code.');
-        }
+
+      const promptFn = typeof window !== 'undefined' && typeof window.prompt === 'function' ? window.prompt : null;
+      const rawCode = promptFn ? promptFn('Enter admin code') : null;
+      const trimmedCode = typeof rawCode === 'string' ? rawCode.trim() : '';
+      if (!trimmedCode) {
         return;
       }
-      if (NETWORK_DISABLED) {
-        if (alertFn) {
-          alertFn('Invalid admin code.');
-        }
-        return;
+
+      const firebase = firebaseNamespace();
+      if (!firebase || typeof firebase.functions !== 'function') {
+        throw new Error('Firebase Functions SDK is not available.');
       }
-      try {
-        const { auth, user } = await ensureSignedInUser();
-        const firebase = firebaseNamespace();
-        if (!firebase || typeof firebase.functions !== 'function') {
-          throw new Error('Firebase Functions SDK is not available.');
-        }
-        const app = ensureFirebaseApp();
-        const functions = firebase.functions(app);
-        if (!functions || typeof functions.httpsCallable !== 'function') {
-          throw new Error('Firebase Functions SDK is not available.');
-        }
-        const callable = functions.httpsCallable('grantAdminByCode');
-        await callable({ code: trimmedCode });
-        logMessage('[ADMIN]', 'claim-grant call=ok');
+      const app = ensureFirebaseApp();
+      const functionsCompat = firebase.functions(app);
+      if (!functionsCompat || typeof functionsCompat.httpsCallable !== 'function') {
+        throw new Error('Firebase Functions SDK is not available.');
+      }
 
-        const activeAuth = auth || ensureAuth();
-        const currentUser = (activeAuth && activeAuth.currentUser) || user || null;
-        if (!currentUser || typeof currentUser.getIdToken !== 'function' || typeof currentUser.getIdTokenResult !== 'function') {
-          throw new Error('Unable to refresh admin token.');
-        }
+      const grant = functionsCompat.httpsCallable('grantAdminByCode');
+      await grant({ code: trimmedCode });
 
-        await currentUser.getIdToken(true);
-        const tokenResult = await currentUser.getIdTokenResult();
-        const claims = (tokenResult && tokenResult.claims) || {};
-        const hasAdminClaim = claimsContainAdmin(claims);
-        logMessage('[ADMIN]', `token-refreshed admin=${hasAdminClaim ? 'true' : 'false'}`);
-        overlayState.claims = claims;
+      await currentUser.getIdToken(true);
+      const idTokenResult = await currentUser.getIdTokenResult();
+      const claims = (idTokenResult && idTokenResult.claims) || {};
+      const isAdmin = claimsContainAdmin(claims);
 
-        if (!hasAdminClaim) {
-          overlayState.isAdmin = false;
-          setBannerMessage('[ADMIN][WARN] Admin privileges are still pending. Please try again later.');
-          return;
-        }
+      if (!isAdmin) {
+        throw new Error('Admin claim missing after refresh');
+      }
 
-        try {
-          await ensureAdminPrivileges({ forceRefresh: true });
-        } catch (error) {
-          logMessage('[ADMIN]', 'claim-verification failed', error);
-          overlayState.isAdmin = false;
-          setBannerMessage('[ADMIN][ERR] Failed to verify admin privileges.');
-          return;
-        }
-
-        overlayState.isAdmin = true;
-        overlayState.adminOverride = false;
-        setBannerMessage(null);
-        renderAdminPanel();
-      } catch (error) {
-        logMessage('[ADMIN]', 'claim-grant error', error);
-        overlayState.isAdmin = false;
-        if (alertFn) {
-          const message = error && typeof error.message === 'string' ? error.message : 'Invalid admin code.';
-          alertFn(message);
-        }
+      overlayState.claims = claims;
+      overlayState.isAdmin = true;
+      logMessage('[ADMIN]', 'claim-grant ok; opening panel');
+      setBannerMessage(null);
+      renderAdminPanel();
+    } catch (err) {
+      overlayState.isAdmin = false;
+      const errCode = err && typeof err.code === 'string' ? err.code : 'error';
+      const message = err && typeof err.message === 'string' ? err.message : String(err);
+      logMessage('[ADMIN][ERR]', `code=${errCode} msg=${message}`, err);
+      if (typeof setBannerMessage === 'function') {
+        setBannerMessage(`[ADMIN][ERR] code=${errCode} msg=${message}`);
+      } else if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert('Admin error: ' + message);
       }
     }
   };
