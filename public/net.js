@@ -1299,13 +1299,41 @@ function ensureAuthReady() {
     updateRoomsTable();
   };
 
+  const redirectToRoomIfPossible = (roomId, isHost) => {
+    const safeRoomId = sanitizeRoomId(roomId);
+    if (!safeRoomId) {
+      return false;
+    }
+    const target = `/room/${encodeURIComponent(safeRoomId)}`;
+    let locationRef = null;
+    if (typeof window !== 'undefined' && window.location) {
+      locationRef = window.location;
+    } else if (typeof globalThis !== 'undefined' && globalThis.location) {
+      locationRef = globalThis.location;
+    }
+    if (!locationRef || typeof locationRef.assign !== 'function') {
+      return false;
+    }
+    try {
+      locationRef.assign(target);
+      hideOverlay();
+      emitEvent('lobbyDismissed', { roomId: safeRoomId, isHost: !!isHost });
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
   const renderHostShare = (result) => {
     if (overlayState.fatalError) {
       showOverlay();
       return;
     }
-    const shareUrl = result && result.shareUrl ? result.shareUrl : '';
     const roomId = result && result.roomId ? result.roomId : '';
+    if (redirectToRoomIfPossible(roomId, true)) {
+      return;
+    }
+    const shareUrl = result && result.shareUrl ? result.shareUrl : '';
     const name = result && result.name ? result.name : '';
     overlayState.contentLocked = false;
     renderContent(`
@@ -1372,6 +1400,9 @@ function ensureAuthReady() {
 
     if (enterButton) {
       enterButton.addEventListener('click', () => {
+        if (redirectToRoomIfPossible(roomId, true)) {
+          return;
+        }
         hideOverlay();
         emitEvent('lobbyDismissed', { roomId, isHost: true });
       });
@@ -1441,6 +1472,10 @@ function ensureAuthReady() {
       showOverlay();
       return;
     }
+    const roomId = result && result.roomId ? result.roomId : netState.roomId || '';
+    if (redirectToRoomIfPossible(roomId, false)) {
+      return;
+    }
     const playerName = result && result.name ? result.name : 'Player';
     overlayState.contentLocked = false;
     renderContent(`
@@ -1454,6 +1489,9 @@ function ensureAuthReady() {
     const button = overlayState.panel.querySelector('#stickfight-join-success-button');
     if (button) {
       button.addEventListener('click', () => {
+        if (redirectToRoomIfPossible(roomId, false)) {
+          return;
+        }
         hideOverlay();
         emitEvent('lobbyDismissed', { roomId: netState.roomId, isHost: false });
       });
