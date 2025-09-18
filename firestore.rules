@@ -11,15 +11,6 @@ service cloud.firestore {
         (request.auth.token.admin == true || request.auth.token.stickfightAdmin == true);
     }
 
-    function playerDocAfter(roomId, uid) {
-      return getAfter(/databases/$(db)/documents/rooms/$(roomId)/players/$(uid));
-    }
-
-    function isRoomMember(roomId) {
-      return isAuthed() &&
-        (request.auth.uid != null ? playerDocAfter(roomId, request.auth.uid).exists : false);
-    }
-
     function roomWriteHasOnlyAllowedFields() {
       return request.resource.data.keys().hasOnly([
         'code',
@@ -47,6 +38,22 @@ service cloud.firestore {
       ]);
     }
 
+    function isRoomHost(roomId) {
+      return isAuthed() &&
+        (resource.data.hostUid == request.auth.uid ||
+          request.resource.data.hostUid == request.auth.uid);
+    }
+
+    match /settings/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /players/{codeWord} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     match /rooms/{roomId} {
       allow read: if true;
 
@@ -62,7 +69,7 @@ service cloud.firestore {
         request.resource.data.hostUid == resource.data.hostUid &&
         (
           isAdmin() ||
-          (isRoomMember(roomId) && roomUpdateHasOnlyAllowedChanges())
+          (isRoomHost(roomId) && roomUpdateHasOnlyAllowedChanges())
         );
 
       allow delete: if isAdmin();
@@ -70,13 +77,11 @@ service cloud.firestore {
       match /players/{uid} {
         allow read: if true;
 
-        allow create, update: if (
-            isAuthed() &&
-            request.auth.uid == uid &&
-            request.resource.data.uid == uid
-          ) || (isAdmin() && request.resource.data.uid == uid);
+        allow create, update: if isAuthed() &&
+          request.auth.uid == uid &&
+          request.resource.data.uid == uid;
 
-        allow delete: if (isAuthed() && request.auth.uid == uid) || isAdmin();
+        allow delete: if isAuthed() && request.auth.uid == uid;
       }
 
       match /signals/{peerId} {
