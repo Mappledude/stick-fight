@@ -12,10 +12,20 @@ type SpawnPoint = {
   dir: 'L' | 'R';
 };
 
+type SpawnPayload = {
+  uid: string;
+  name: string;
+  color: string;
+  x: number;
+  y: number;
+  dir: 'L' | 'R';
+  ts: unknown;
+};
+
 type EnterRoomHandle = {
   ref: ReturnType<typeof getPlayerDoc>;
   cleanup: () => Promise<void>;
-  meta: { name: string; color: string; spawn: SpawnPoint };
+  payload: SpawnPayload;
 };
 
 const HEARTBEAT_INTERVAL_MS = 15000;
@@ -46,7 +56,7 @@ export async function enterRoom(
   const color = typeof options.color === 'string' && options.color.trim() ? options.color : randomColor();
   const name = typeof options.name === 'string' && options.name.trim() ? options.name : 'Player';
 
-  const payload = {
+  const payload: SpawnPayload = {
     uid,
     name,
     color,
@@ -107,7 +117,7 @@ export async function enterRoom(
     }
   };
 
-  return { ref, cleanup, meta: { name, color, spawn } };
+  return { ref, cleanup, payload };
 }
 
 export async function leaveRoom(

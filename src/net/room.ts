@@ -51,15 +51,8 @@ export async function mountRoom(options: RoomMountOptions): Promise<RoomHandle> 
 
   try {
     presenceHandle = await enterRoom(roomCode, uid, { name, color });
-    const { spawn } = presenceHandle.meta;
-    playersState.set(uid, {
-      uid,
-      name: presenceHandle.meta.name,
-      color: presenceHandle.meta.color,
-      x: spawn.x,
-      y: spawn.y,
-      dir: spawn.dir,
-    });
+    const { payload } = presenceHandle;
+    playersState.set(uid, { ...payload });
     notify();
 
     unsubscribe = watchPlayers(roomCode, uid, (map) => {
