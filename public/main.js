@@ -2196,6 +2196,7 @@ if (debugMode) {
       this.playArea = { x: 0, y: 0, w: MIN_LAYOUT_WIDTH, h: MIN_LAYOUT_HEIGHT };
       this._playAreaPadOverride = null;
       this.playBorder = null;
+      this.stageLine = null;
       this._playAreaDiagText = null;
       this._playAreaDiagGrid = null;
       this._playAreaDiagLastText = null;
@@ -2916,6 +2917,11 @@ this.netOverlay = (typeof this.netOverlay !== 'undefined') ? this.netOverlay : n
         this.playBorder.setDepth(9);
       }
 
+      if (!this.stageLine && this.add && typeof this.add.graphics === 'function') {
+        this.stageLine = this.add.graphics();
+        this.stageLine.setDepth(1000);
+      }
+
       if (this.diagnosticsActive() && typeof console !== 'undefined' && console) {
         const modes = [];
         if (this._joyDiagModes.noControls) {
@@ -3537,38 +3543,62 @@ this.teardownNetworking && this.teardownNetworking();
     }
 
     updatePlayAreaBorder() {
-      if (!this.playBorder || !this.playArea) {
+      if ((!this.playBorder && !this.stageLine) || !this.playArea) {
         return;
       }
 
       const play = this.playArea;
       const border = this.playBorder;
+      const stageLine = this.stageLine || null;
 
-      border.clear();
+      if (border) {
+        border.clear();
+      }
+      if (stageLine) {
+        stageLine.clear();
+      }
 
       if (!play || play.w <= 0 || play.h <= 0) {
-        border.setVisible(false);
+        if (border) {
+          border.setVisible(false);
+        }
+        if (stageLine) {
+          stageLine.setVisible(false);
+        }
         return;
       }
 
-      border.setVisible(true);
-      border.setDepth(9);
-      border.lineStyle(3, 0xffffff, 0.8);
-      border.strokeRect(
-        play.x + 0.5,
-        play.y + 0.5,
-        Math.max(play.w - 1, 0),
-        Math.max(play.h - 1, 0)
-      );
-
-      if (play.w > 12 && play.h > 12) {
-        border.lineStyle(1, 0xffffff, 0.25);
+      if (border) {
+        border.setVisible(true);
+        border.setDepth(9);
+        border.lineStyle(3, 0xffffff, 0.8);
         border.strokeRect(
-          play.x + 6.5,
-          play.y + 6.5,
-          Math.max(play.w - 13, 0),
-          Math.max(play.h - 13, 0)
+          play.x + 0.5,
+          play.y + 0.5,
+          Math.max(play.w - 1, 0),
+          Math.max(play.h - 1, 0)
         );
+
+        if (play.w > 12 && play.h > 12) {
+          border.lineStyle(1, 0xffffff, 0.25);
+          border.strokeRect(
+            play.x + 6.5,
+            play.y + 6.5,
+            Math.max(play.w - 13, 0),
+            Math.max(play.h - 13, 0)
+          );
+        }
+      }
+
+      if (stageLine) {
+        stageLine.setVisible(true);
+        stageLine.setDepth(1000);
+        stageLine.lineStyle(2, 0xffffff, 1);
+        const midY = play.y + play.h / 2;
+        stageLine.beginPath();
+        stageLine.moveTo(play.x, midY);
+        stageLine.lineTo(play.x + play.w, midY);
+        stageLine.strokePath();
       }
     }
 
