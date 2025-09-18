@@ -49,14 +49,17 @@
     overlay: null,
     panel: null,
     isAdmin: false,
-    claims: null,
-    adminOverride: false,
     fatalError: false,
     fatalMessage: null,
     pendingFatalMessage: null,
     contentLocked: false,
     overlayInitRequested: false,
     bannerMessage: null,
+    activeView: 'lobby',
+    joinPrefillCode: '',
+    pendingJoinRoomId: '',
+    routeHandlerAttached: false,
+    invalidRoomLink: false,
   };
 
   const lobbyRoomsState = {
@@ -229,7 +232,6 @@
 // --- Auth bootstrap (namespaced Firebase v8 style) ---------------------------
 let _authInstance = null;
 let _signInPromise = null;
-let _adminCheckPromise = null;
 
 /** Return the firebase.auth() singleton, initializing Firebase app if needed. */
 function ensureAuth() {
@@ -375,84 +377,11 @@ function ensureAuthReady() {
     bootLog('AUTH', `uid=${uid}`);
   };
 
-  const ADMIN_CLAIM_KEYS = ['admin', 'stickfightAdmin'];
-
-  const claimsContainAdmin = (claims) => {
-    if (!claims || typeof claims !== 'object') {
-      return false;
-    }
-    for (let i = 0; i < ADMIN_CLAIM_KEYS.length; i += 1) {
-      const key = ADMIN_CLAIM_KEYS[i];
-      if (claims[key] === true) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  const ensureAdminPrivileges = async (options) => {
-    const opts = options || {};
-    const forceRefresh = !!opts.forceRefresh;
-    const overrideActive = overlayState.adminOverride && !!bootFlags && !!bootFlags.debug;
-    if (overrideActive) {
-      const { auth, user } = await ensureSignedInUser();
-      const currentUser = user || (auth && auth.currentUser) || null;
-      logMessage('[ADMIN]', 'override-active (dev use only)');
-      logMessage('[ADMIN]', 'entered');
-      return { auth, user: currentUser, claims: overlayState.claims || {} };
-    }
-    if (_adminCheckPromise && !forceRefresh) {
-      try {
-        const result = await _adminCheckPromise;
-        if (result && claimsContainAdmin(result.claims)) {
-          return result;
-        }
-      } catch (error) {
-        // ignore cached failure and retry below
-      }
-    }
-
+  const ensureAdminPrivileges = async () => {
     const { auth, user } = await ensureSignedInUser();
-    const currentUser = user || (auth && auth.currentUser);
-    if (!currentUser || !currentUser.uid) {
-      throw new Error('Unable to determine the authenticated user.');
-    }
-
-    const fetchClaims = async (refresh) => {
-      try {
-        return await currentUser.getIdTokenResult(refresh);
-      } catch (error) {
-        if (refresh) {
-          throw error;
-        }
-        return currentUser.getIdTokenResult(true);
-      }
-    };
-
-    _adminCheckPromise = Promise.resolve()
-      .then(() => fetchClaims(forceRefresh))
-      .then((tokenResult) => {
-        if (!tokenResult) {
-          throw new Error('Failed to verify admin privileges.');
-        }
-        const claims = tokenResult.claims || {};
-        overlayState.claims = claims;
-        if (!claimsContainAdmin(claims)) {
-          const error = new Error(
-            'Admin privileges are required. Ask the project owner to grant the admin custom claim.'
-          );
-          error.code = 'auth/not-admin';
-          error.claims = claims;
-          throw error;
-        }
-        return { auth, user: currentUser, claims };
-      })
-      .catch((error) => {
-        overlayState.claims = (error && error.claims) || overlayState.claims || null;
-        throw error;
-      });
-
-    return _adminCheckPromise;
+    const currentUser = user || (auth && auth.currentUser) || null;
+    overlayState.isAdmin = true;
+    return { auth, user: currentUser, claims: {} };
   };
 
   const namespace = global.StickFightNet || {};
@@ -1068,9 +997,14 @@ return withFirestoreErrorHandling('update', async () => {
       <div class="stickfight-rooms-section">
         <div class="stickfight-rooms-header">
           <h3>Open Lobbies</h3>
-          ${includeAdminButton
-            ? '<button type="button" class="stickfight-secondary-button" id="stickfight-admin-entry">Admin</button>'
-            : ''}
+          <div class="stickfight-rooms-actions">
+            <a class="stickfight-secondary-button stickfight-join-link" href="#/join" id="stickfight-open-join">Join Table</a>
+            ${
+              includeAdminButton
+                ? '<button type="button" class="stickfight-secondary-button" id="stickfight-admin-entry">Admin</button>'
+                : ''
+            }
+          </div>
         </div>
         <div id="stickfight-rooms-table"></div>
       </div>
@@ -1086,10 +1020,14 @@ return withFirestoreErrorHandling('update', async () => {
       .map((room) => {
         const maxPlayers = typeof room.maxPlayers === 'number' && room.maxPlayers > 0 ? room.maxPlayers : null;
         const countText = maxPlayers ? `${room.playerCount}/${maxPlayers}` : `${room.playerCount}`;
+        const code = escapeHtml(room.code);
         return `
           <tr>
-            <td>${escapeHtml(room.code)}</td>
+            <td>${code}</td>
             <td>${escapeHtml(String(countText))}</td>
+            <td class="stickfight-join-cell">
+              <button type="button" class="stickfight-secondary-button stickfight-room-join" data-room-code="${code}">Join</button>
+            </td>
           </tr>
         `;
       })
@@ -1100,6 +1038,7 @@ return withFirestoreErrorHandling('update', async () => {
           <tr>
             <th>Code</th>
             <th>Players</th>
+            <th>Join</th>
           </tr>
         </thead>
         <tbody>
@@ -1118,6 +1057,17 @@ return withFirestoreErrorHandling('update', async () => {
       return;
     }
     container.innerHTML = renderRoomsTableMarkup();
+    const joinButtons = container.querySelectorAll('.stickfight-room-join');
+    joinButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const raw = button.getAttribute('data-room-code') || '';
+        const sanitized = sanitizeRoomId(raw) || (raw ? raw.trim().toUpperCase() : '');
+        overlayState.joinPrefillCode = sanitized;
+        overlayState.pendingJoinRoomId = '';
+        overlayState.invalidRoomLink = false;
+        goToRoute('#/join');
+      });
+    });
   };
 
   const refreshRoomsFromSnapshot = async (snapshot) => {
@@ -1213,66 +1163,10 @@ await withFirestoreErrorHandling('listen', async () => {
     }
   };
 
-  const handleAdminEntry = async () => {
+  const handleAdminEntry = () => {
     logConfigScope('admin-handle-entry');
-    if (overlayState.isAdmin) {
-      renderAdminPanel();
-      return;
-    }
-
-    try {
-      const { auth, user } = await ensureSignedInUser();
-      const activeAuth = auth || ensureAuth();
-      const currentUser = user || (activeAuth && activeAuth.currentUser) || null;
-      if (!currentUser) {
-        throw new Error('Sign in required.');
-      }
-
-      const promptFn = typeof window !== 'undefined' && typeof window.prompt === 'function' ? window.prompt : null;
-      const rawCode = promptFn ? promptFn('Enter admin code') : null;
-      const trimmedCode = typeof rawCode === 'string' ? rawCode.trim() : '';
-      if (!trimmedCode) {
-        return;
-      }
-
-      const firebase = firebaseNamespace();
-      if (!firebase || typeof firebase.functions !== 'function') {
-        throw new Error('Firebase Functions SDK is not available.');
-      }
-      const app = ensureFirebaseApp();
-      const functionsCompat = firebase.functions(app);
-      if (!functionsCompat || typeof functionsCompat.httpsCallable !== 'function') {
-        throw new Error('Firebase Functions SDK is not available.');
-      }
-
-      const grant = functionsCompat.httpsCallable('grantAdminByCode');
-      await grant({ code: trimmedCode });
-
-      await currentUser.getIdToken(true);
-      const idTokenResult = await currentUser.getIdTokenResult();
-      const claims = (idTokenResult && idTokenResult.claims) || {};
-      const isAdmin = claimsContainAdmin(claims);
-
-      if (!isAdmin) {
-        throw new Error('Admin claim missing after refresh');
-      }
-
-      overlayState.claims = claims;
-      overlayState.isAdmin = true;
-      logMessage('[ADMIN]', 'claim-grant ok; opening panel');
-      setBannerMessage(null);
-      renderAdminPanel();
-    } catch (err) {
-      overlayState.isAdmin = false;
-      const errCode = err && typeof err.code === 'string' ? err.code : 'error';
-      const message = err && typeof err.message === 'string' ? err.message : String(err);
-      logMessage('[ADMIN][ERR]', `code=${errCode} msg=${message}`, err);
-      if (typeof setBannerMessage === 'function') {
-        setBannerMessage(`[ADMIN][ERR] code=${errCode} msg=${message}`);
-      } else if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-        window.alert('Admin error: ' + message);
-      }
-    }
+    overlayState.isAdmin = true;
+    goToRoute('#/admin');
   };
 
   const attachAdminEntryHandler = () => {
@@ -1280,10 +1174,21 @@ await withFirestoreErrorHandling('listen', async () => {
       return;
     }
     const adminButton = overlayState.panel.querySelector('#stickfight-admin-entry');
-    if (!adminButton) {
-      return;
+    if (adminButton) {
+      adminButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        handleAdminEntry();
+      });
     }
-    adminButton.addEventListener('click', handleAdminEntry);
+    const joinLink = overlayState.panel.querySelector('#stickfight-open-join');
+    if (joinLink) {
+      joinLink.addEventListener('click', (event) => {
+        event.preventDefault();
+        overlayState.pendingJoinRoomId = '';
+        overlayState.invalidRoomLink = false;
+        goToRoute('#/join');
+      });
+    }
   };
 
   const renderAdminPanel = () => {
@@ -1293,7 +1198,9 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     showOverlay();
     overlayState.contentLocked = false;
-    renderContent(`
+    renderView(
+      'admin',
+      `
       <h2>Admin Controls</h2>
       <p>Manage rooms for debugging and moderation. Be careful—deletions are permanent.</p>
       <div class="stickfight-admin-grid">
@@ -1307,17 +1214,13 @@ await withFirestoreErrorHandling('listen', async () => {
           <button type="submit" class="stickfight-secondary-button">Delete All Rooms</button>
         </form>
         <div class="stickfight-admin-status" id="stickfight-admin-status"></div>
-        <div style="display: flex; justify-content: flex-end; gap: 12px;">
-          ${
-            overlayState.isAdmin
-              ? '<button type="button" class="stickfight-secondary-button" id="stickfight-admin-signout">Sign out admin</button>'
-              : ''
-          }
+        <div class="stickfight-admin-actions">
           <button type="button" class="stickfight-secondary-button" id="stickfight-admin-back">Back</button>
         </div>
       </div>
       ${roomsSectionMarkup(false)}
-    `);
+    `
+    );
 
     const statusEl = overlayState.panel.querySelector('#stickfight-admin-status');
     const setStatus = (message) => {
@@ -1389,73 +1292,10 @@ await withFirestoreErrorHandling('listen', async () => {
       });
     }
 
-    const signOutButton = overlayState.panel.querySelector('#stickfight-admin-signout');
-    if (signOutButton) {
-      signOutButton.addEventListener('click', async () => {
-        if (signOutButton.disabled) {
-          return;
-        }
-        signOutButton.disabled = true;
-        setStatus('Revoking admin access...');
-        try {
-          const { auth, user } = await ensureSignedInUser();
-          const currentUser = user || (auth && auth.currentUser) || null;
-          if (!currentUser || typeof currentUser.getIdToken !== 'function') {
-            throw new Error('No authenticated user available.');
-          }
-
-          const callableResult = await withFirestoreErrorHandling('callable/revokeAdmin', async () => {
-            const functions = ensureFunctions();
-            if (!functions || typeof functions.httpsCallable !== 'function') {
-              throw new Error('Cloud Functions callable is not available.');
-            }
-            const callable = functions.httpsCallable('revokeAdmin');
-            return callable();
-          });
-
-          try {
-            await currentUser.getIdToken(true);
-          } catch (tokenError) {
-            logMessage('[ADMIN]', 'revoke-admin token refresh failed', tokenError);
-          }
-
-          let refreshedClaims = null;
-          try {
-            if (typeof currentUser.getIdTokenResult === 'function') {
-              const tokenResult = await currentUser.getIdTokenResult(true);
-              refreshedClaims = tokenResult && tokenResult.claims ? tokenResult.claims : null;
-            }
-          } catch (claimsError) {
-            logMessage('[ADMIN]', 'revoke-admin claims refresh failed', claimsError);
-          }
-
-          overlayState.claims = refreshedClaims;
-          overlayState.isAdmin = false;
-          overlayState.adminOverride = false;
-          _adminCheckPromise = null;
-          setBannerMessage(null);
-
-          const callableData =
-            callableResult && typeof callableResult === 'object' && Object.prototype.hasOwnProperty.call(callableResult, 'data')
-              ? callableResult.data
-              : callableResult;
-          logMessage('[ADMIN]', 'revoke-admin complete', { result: callableData, claims: refreshedClaims });
-
-          setStatus('Admin access revoked.');
-          hideOverlay();
-        } catch (error) {
-          logMessage('[ADMIN]', 'revoke-admin failed', error);
-          const message = error && error.message ? error.message : 'Failed to revoke admin access.';
-          setStatus(message);
-          signOutButton.disabled = false;
-        }
-      });
-    }
-
     const backButton = overlayState.panel.querySelector('#stickfight-admin-back');
     if (backButton) {
       backButton.addEventListener('click', () => {
-        renderCreateLobby();
+        goToRoute('#/lobby');
       });
     }
 
@@ -1507,6 +1347,42 @@ await withFirestoreErrorHandling('listen', async () => {
         border-radius: 16px;
         box-shadow: 0 28px 60px rgba(2, 6, 14, 0.6);
         padding: 28px 32px;
+      }
+      .stickfight-main {
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+      }
+      .topbar {
+        display: flex;
+        justify-content: center;
+        gap: 20px;
+        padding-bottom: 16px;
+        margin-bottom: 24px;
+        border-bottom: 1px solid rgba(11, 180, 255, 0.25);
+      }
+      .nav {
+        display: inline-flex;
+        align-items: center;
+        gap: 18px;
+      }
+      .nav-link {
+        color: rgba(224, 245, 255, 0.9);
+        text-decoration: none;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        transition: color 0.2s ease;
+      }
+      .nav-link:hover {
+        color: #ffffff;
+      }
+      .nav-link.active {
+        color: #ffffff;
+        text-decoration: underline;
+      }
+      .hidden {
+        display: none !important;
       }
       .stickfight-error-banner {
         margin-bottom: 20px;
@@ -1629,6 +1505,11 @@ await withFirestoreErrorHandling('listen', async () => {
         margin-bottom: 16px;
         gap: 16px;
       }
+      .stickfight-rooms-actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
       .stickfight-rooms-header h3 {
         margin: 0;
         font-size: 1.2rem;
@@ -1647,6 +1528,11 @@ await withFirestoreErrorHandling('listen', async () => {
       }
       .stickfight-rooms-table tbody tr:hover {
         background: rgba(11, 180, 255, 0.08);
+      }
+      .stickfight-join-cell {
+        text-align: right;
+        width: 1%;
+        white-space: nowrap;
       }
       .stickfight-empty {
         margin: 0;
@@ -1671,6 +1557,11 @@ await withFirestoreErrorHandling('listen', async () => {
         min-height: 1.2em;
         font-size: 0.95rem;
         color: rgba(182, 235, 255, 0.9);
+      }
+      .stickfight-admin-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 12px;
       }
     `;
     document.head.appendChild(style);
@@ -1725,6 +1616,37 @@ await withFirestoreErrorHandling('listen', async () => {
     applyBannerMessage();
   };
 
+  const renderLayout = (activeView, bodyHtml) => {
+    const navLink = (view, id, label) => {
+      const isActive = activeView === view ? ' active' : '';
+      return `<a href="#/${view}" id="${id}" class="nav-link${isActive}">${label}</a>`;
+    };
+    const viewSection = (view) => {
+      const hiddenClass = activeView === view ? '' : ' class="hidden"';
+      const content = activeView === view ? bodyHtml : '';
+      return `<section data-view="${view}"${hiddenClass}>${content}</section>`;
+    };
+    return `
+      <header class="topbar">
+        <nav class="nav">
+          ${navLink('lobby', 'link-lobby', 'Lobby')}
+          ${navLink('admin', 'link-admin', 'Admin')}
+          ${navLink('join', 'link-join', 'Join Table')}
+        </nav>
+      </header>
+      <main class="stickfight-main">
+        ${viewSection('lobby')}
+        ${viewSection('admin')}
+        ${viewSection('join')}
+      </main>
+    `;
+  };
+
+  const renderView = (activeView, bodyHtml, options) => {
+    overlayState.activeView = activeView;
+    renderContent(renderLayout(activeView, bodyHtml), options);
+  };
+
   function renderKeyVerificationError(message) {
     const fallbackMessage = '[KEY][ERR] Firebase API key verification failed.';
     const effectiveMessage =
@@ -1745,7 +1667,8 @@ await withFirestoreErrorHandling('listen', async () => {
 
     const safeMessage = escapeHtml(effectiveMessage);
     showOverlay();
-    renderContent(
+    renderView(
+      'lobby',
       `
       <h2>Configuration Error</h2>
       <div class="stickfight-lobby-error" style="margin-bottom: 16px;">${safeMessage}</div>
@@ -1764,7 +1687,7 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     showOverlay();
     overlayState.contentLocked = false;
-    renderContent(`
+    renderView('lobby', `
       <h2>Host a Lobby</h2>
       <p>Create a room and share the invite link with your friends.</p>
       <form class="stickfight-lobby-form" id="stickfight-create-form">
@@ -1850,7 +1773,7 @@ await withFirestoreErrorHandling('listen', async () => {
     const shareUrl = result && result.shareUrl ? result.shareUrl : '';
     const name = result && result.name ? result.name : '';
     overlayState.contentLocked = false;
-    renderContent(`
+    renderView('lobby', `
       <h2>Lobby Ready</h2>
       <p>${escapeHtml(name || 'Host')}, share this link so your friends can join your room.</p>
       <div class="stickfight-share-row">
@@ -1933,7 +1856,8 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     showOverlay();
     overlayState.contentLocked = false;
-    renderContent(`
+    overlayState.joinPrefillCode = roomId;
+    renderView('join', `
       <h2>Join Lobby</h2>
       <p>Enter a nickname to join room <strong>${escapeHtml(roomId)}</strong>.</p>
       <form class="stickfight-lobby-form" id="stickfight-join-form">
@@ -1982,6 +1906,71 @@ await withFirestoreErrorHandling('listen', async () => {
     updateRoomsTable();
   };
 
+  const renderJoinTableView = () => {
+    if (overlayState.fatalError) {
+      showOverlay();
+      return;
+    }
+    showOverlay();
+    overlayState.contentLocked = false;
+    overlayState.invalidRoomLink = false;
+    renderView(
+      'join',
+      `
+      <h2>Join Table</h2>
+      <p>Enter a room code to join an existing lobby.</p>
+      <form class="stickfight-lobby-form" id="join-form">
+        <label>
+          <span>Room Code</span>
+          <input type="text" id="join-code" name="code" placeholder="Enter room code" autocomplete="off" required />
+        </label>
+        <div class="stickfight-lobby-error" id="stickfight-join-code-error"></div>
+        <button type="submit" class="stickfight-primary-button">Join</button>
+      </form>
+      ${roomsSectionMarkup()}
+    `
+    );
+
+    const form = overlayState.panel.querySelector('#join-form');
+    const input = overlayState.panel.querySelector('#join-code');
+    const errorEl = overlayState.panel.querySelector('#stickfight-join-code-error');
+
+    if (input && overlayState.joinPrefillCode) {
+      input.value = overlayState.joinPrefillCode;
+      input.focus();
+    } else if (input) {
+      input.focus();
+    }
+
+    if (!form) {
+      return;
+    }
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (!input) {
+        return;
+      }
+      const rawCode = input.value ? input.value.trim().toUpperCase() : '';
+      const sanitized = sanitizeRoomId(rawCode);
+      if (!sanitized) {
+        if (errorEl) {
+          errorEl.textContent = 'Enter a valid room code.';
+        }
+        return;
+      }
+      if (errorEl) {
+        errorEl.textContent = '';
+      }
+      overlayState.joinPrefillCode = sanitized;
+      overlayState.pendingJoinRoomId = sanitized;
+      renderJoinForm(sanitized);
+    });
+
+    attachAdminEntryHandler();
+    updateRoomsTable();
+  };
+
   const renderJoinSuccess = (result) => {
     if (overlayState.fatalError) {
       showOverlay();
@@ -1993,7 +1982,7 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     const playerName = result && result.name ? result.name : 'Player';
     overlayState.contentLocked = false;
-    renderContent(`
+    renderView('join', `
       <h2>Ready to Fight</h2>
       <p>${escapeHtml(playerName)}, you have joined the lobby. Waiting for the host to start the match!</p>
       <div style="display: flex; justify-content: flex-end; margin-top: 24px;">
@@ -2020,7 +2009,7 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     showOverlay();
     overlayState.contentLocked = false;
-    renderContent(`
+    renderView('join', `
       <h2>Invalid Link</h2>
       <p>The lobby link you followed is missing or invalid. You can create a new game to get started.</p>
       <div style="display: flex; justify-content: flex-end; margin-top: 24px;">
@@ -2038,6 +2027,90 @@ await withFirestoreErrorHandling('listen', async () => {
 
     attachAdminEntryHandler();
     updateRoomsTable();
+  };
+
+  const normalizeRouteKey = (value) => {
+    if (value === '#/admin' || value === '#/join' || value === '#/lobby') {
+      return value;
+    }
+    if (value === '#admin') {
+      return '#/admin';
+    }
+    if (value === '#join') {
+      return '#/join';
+    }
+    if (value === '#lobby') {
+      return '#/lobby';
+    }
+    return '#/lobby';
+  };
+
+  const getCurrentRoute = () => {
+    if (typeof window === 'undefined' || !window.location) {
+      return '#/lobby';
+    }
+    return normalizeRouteKey(window.location.hash || '');
+  };
+
+  const handleRoute = (routeOverride) => {
+    const routeKey = normalizeRouteKey(routeOverride || getCurrentRoute());
+    switch (routeKey) {
+      case '#/admin':
+        renderAdminPanel();
+        break;
+      case '#/join':
+        if (overlayState.invalidRoomLink) {
+          overlayState.invalidRoomLink = false;
+          renderInvalidRoom();
+        } else if (overlayState.pendingJoinRoomId) {
+          const code = overlayState.pendingJoinRoomId;
+          overlayState.pendingJoinRoomId = '';
+          renderJoinForm(code);
+        } else {
+          renderJoinTableView();
+        }
+        break;
+      case '#/lobby':
+      default:
+        renderCreateLobby();
+        break;
+    }
+  };
+
+  function goToRoute(route) {
+    const target = normalizeRouteKey(route);
+    if (typeof window === 'undefined' || !window.location) {
+      handleRoute(target);
+      return;
+    }
+    const current = normalizeRouteKey(window.location.hash || '');
+    if (current === target) {
+      handleRoute(target);
+      return;
+    }
+    window.location.hash = target;
+  }
+
+  const setupRouter = (initialRoute) => {
+    const targetRoute = normalizeRouteKey(initialRoute || getCurrentRoute());
+    if (overlayState.routeHandlerAttached) {
+      handleRoute(targetRoute);
+      return;
+    }
+    if (typeof window === 'undefined') {
+      overlayState.routeHandlerAttached = true;
+      handleRoute(targetRoute);
+      return;
+    }
+    const onHashChange = () => handleRoute();
+    window.addEventListener('hashchange', onHashChange);
+    overlayState.routeHandlerAttached = true;
+    const current = normalizeRouteKey(window.location.hash || '');
+    if (!window.location.hash || current !== targetRoute) {
+      window.location.hash = targetRoute;
+    } else {
+      handleRoute(targetRoute);
+    }
   };
 
   const initializeOverlayFlow = () => {
@@ -2065,15 +2138,20 @@ await withFirestoreErrorHandling('listen', async () => {
       roomId = match ? decodeURIComponent(match[1]) : '';
     }
     const safeRoomId = sanitizeRoomId(roomId);
-    if (overlayState.fatalError) {
-      renderKeyVerificationError();
-    } else if (safeRoomId) {
-      renderJoinForm(safeRoomId);
+    let initialRoute = null;
+    if (safeRoomId) {
+      overlayState.pendingJoinRoomId = safeRoomId;
+      overlayState.joinPrefillCode = safeRoomId;
+      initialRoute = '#/join';
     } else if (roomId) {
-      renderInvalidRoom();
-    } else {
-      renderCreateLobby();
+      overlayState.joinPrefillCode = roomId.trim().toUpperCase();
+      overlayState.invalidRoomLink = true;
+      initialRoute = '#/join';
     }
+    if (!initialRoute && typeof window !== 'undefined' && window.location && window.location.hash) {
+      initialRoute = normalizeRouteKey(window.location.hash);
+    }
+    setupRouter(initialRoute || '#/lobby');
   };
 
   const initWhenReady = () => {
@@ -2109,7 +2187,7 @@ await withFirestoreErrorHandling('listen', async () => {
     adminDeleteAllRooms,
     showAdminPanel: () => {
       overlayState.isAdmin = true;
-      renderAdminPanel();
+      goToRoute('#/admin');
     },
   });
 })(typeof window !== 'undefined' ? window : this);

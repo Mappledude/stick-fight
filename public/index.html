@@ -28,14 +28,35 @@
         user-select: none;
       }
 
-      #game-root {
+      #room-border {
         position: fixed;
         top: var(--safe-area-inset-top);
         right: var(--safe-area-inset-right);
         bottom: var(--safe-area-inset-bottom);
         left: var(--safe-area-inset-left);
-        width: auto;
-        height: auto;
+        border: 2px solid #fff;
+        border-radius: 8px;
+        background: #000;
+        overflow: hidden;
+        box-sizing: border-box;
+      }
+
+      #game-root {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      .stage-line {
+        position: absolute;
+        top: 50%;
+        left: 0;
+        right: 0;
+        border-top: 2px solid #fff;
+        opacity: 0.85;
+        pointer-events: none;
+        transform: translateY(-1px);
       }
 
       canvas {
@@ -253,6 +274,9 @@
       <ul class="boot-overlay__status" data-boot-status></ul>
       <pre class="boot-overlay__error" data-boot-error hidden></pre>
     </div>
-    <div id="game-root"></div>
+    <div id="room-border">
+      <div class="stage-line"></div>
+      <div id="game-root"></div>
+    </div>
   </body>
 </html>
