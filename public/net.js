@@ -42,6 +42,8 @@
     peerId: null,
     isHost: false,
     playerName: null,
+    playerColor: null,
+    playerCodeWord: null,
     roomName: null,
     roomStructure: null,
     shareUrl: null,
@@ -67,6 +69,14 @@
   };
 
   const ADMIN_ADD_CODE_STORAGE_KEY = 'stickfight.adminAddCode';
+  const PLAYER_IDENTITY_STORAGE_KEY = 'stickfight.playerIdentity';
+  const DEFAULT_IDENTITY_COLOR = '#FFFFFF';
+  const IDENTITY_COLOR_REGEX = /^#[0-9A-F]{6}$/;
+
+  const identityState = {
+    loaded: false,
+    value: null,
+  };
 
   const DEFAULT_ROOM_STRUCTURES = Object.freeze([
     { value: 'random', label: 'Random' },
@@ -122,6 +132,133 @@
     } catch (error) {
       // ignore storage errors
     }
+  };
+
+  const getLocalStorage = () => {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+    try {
+      if (window.localStorage) {
+        return window.localStorage;
+      }
+    } catch (error) {
+      return null;
+    }
+    return null;
+  };
+
+  const normalizeIdentityColor = (value) => {
+    if (typeof value !== 'string') {
+      return DEFAULT_IDENTITY_COLOR;
+    }
+    const trimmed = value.trim().toUpperCase();
+    return IDENTITY_COLOR_REGEX.test(trimmed) ? trimmed : DEFAULT_IDENTITY_COLOR;
+  };
+
+  const sanitizeCodeWord = (value) => {
+    if (typeof value !== 'string') {
+      return '';
+    }
+    const trimmed = value.trim().toUpperCase();
+    return /^[A-Z]{4}$/.test(trimmed) ? trimmed : '';
+  };
+
+  const normalizePlayerIdentity = (raw) => {
+    if (!raw || typeof raw !== 'object') {
+      return null;
+    }
+    const codeWord = sanitizeCodeWord(raw.codeWord);
+    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+    if (!codeWord || !name) {
+      return null;
+    }
+    const color = normalizeIdentityColor(raw.color);
+    return { codeWord, name, color };
+  };
+
+  const persistIdentityToStorage = (identity) => {
+    const storage = getLocalStorage();
+    if (!storage) {
+      return;
+    }
+    try {
+      if (identity) {
+        storage.setItem(PLAYER_IDENTITY_STORAGE_KEY, JSON.stringify(identity));
+      } else {
+        storage.removeItem(PLAYER_IDENTITY_STORAGE_KEY);
+      }
+    } catch (error) {
+      // ignore storage errors
+    }
+  };
+
+  const applyIdentityToNetState = (identity) => {
+    if (identity) {
+      netState.playerName = identity.name;
+      netState.playerColor = identity.color;
+      netState.playerCodeWord = identity.codeWord;
+    } else {
+      netState.playerName = null;
+      netState.playerColor = null;
+      netState.playerCodeWord = null;
+    }
+  };
+
+  const loadIdentityFromStorage = () => {
+    identityState.loaded = true;
+    identityState.value = null;
+    const storage = getLocalStorage();
+    if (!storage) {
+      return null;
+    }
+    try {
+      const stored = storage.getItem(PLAYER_IDENTITY_STORAGE_KEY);
+      if (!stored) {
+        applyIdentityToNetState(null);
+        return null;
+      }
+      const parsed = JSON.parse(stored);
+      const normalized = normalizePlayerIdentity(parsed);
+      if (normalized) {
+        identityState.value = normalized;
+        applyIdentityToNetState(normalized);
+        return normalized;
+      }
+      storage.removeItem(PLAYER_IDENTITY_STORAGE_KEY);
+      applyIdentityToNetState(null);
+    } catch (error) {
+      try {
+        storage.removeItem(PLAYER_IDENTITY_STORAGE_KEY);
+      } catch (_) {
+        // ignore
+      }
+      applyIdentityToNetState(null);
+    }
+    return null;
+  };
+
+  const getPlayerIdentity = () => {
+    if (!identityState.loaded) {
+      return loadIdentityFromStorage();
+    }
+    return identityState.value;
+  };
+
+  const setPlayerIdentity = (identity) => {
+    const normalized = normalizePlayerIdentity(identity);
+    identityState.loaded = true;
+    identityState.value = normalized;
+    persistIdentityToStorage(normalized);
+    applyIdentityToNetState(normalized || null);
+    return normalized;
+  };
+
+  const clearPlayerIdentity = () => {
+    identityState.loaded = true;
+    identityState.value = null;
+    persistIdentityToStorage(null);
+    applyIdentityToNetState(null);
   };
 
   const resolveRoomStructureOptions = () => {
@@ -796,26 +933,50 @@ const handleFirestoreError = (op, error) => {
   setBannerMessage(`[FS][ERR] ${details.formatted}`);
 };
 
-const withFirestoreErrorHandling = async (op, action) => {
-  try {
-    return await action();
-  } catch (error) {
-    handleFirestoreError(op, error);
-    throw error;
-  }
-};
+  const withFirestoreErrorHandling = async (op, action) => {
+    try {
+      return await action();
+    } catch (error) {
+      handleFirestoreError(op, error);
+      throw error;
+    }
+  };
+
+  const fetchPlayerIdentityByCodeWord = async (codeWord) =>
+    withFirestoreErrorHandling('read', async () => {
+      const sanitized = sanitizeCodeWord(codeWord);
+      if (!sanitized) {
+        return null;
+      }
+      const firestore = ensureFirestore();
+      const snapshot = await firestore.collection('players').doc(sanitized).get();
+      if (!snapshot || !snapshot.exists) {
+        return null;
+      }
+      const data = snapshot.data() || {};
+      if (data.active === false) {
+        return null;
+      }
+      return normalizePlayerIdentity({
+        codeWord: sanitized,
+        name: data.name,
+        color: data.color,
+      });
+    });
 
 // ---------- Room creation (host) with device-lock & metadata ----------
 
-const createRoomRecord = async ({ hostUid, hostName, roomName, structure }) =>
-  withFirestoreErrorHandling('create', async () => {
-    const firestore = ensureFirestore();
-    const resolvedName = hostName && hostName.trim() ? hostName.trim() : 'Host';
-    const resolvedRoomName = sanitizeRoomName(roomName);
-    const resolvedStructure = normalizeStructureValue(structure);
+  const createRoomRecord = async ({ hostUid, hostName, hostColor, hostCodeWord, roomName, structure }) =>
+    withFirestoreErrorHandling('create', async () => {
+      const firestore = ensureFirestore();
+      const resolvedName = hostName && hostName.trim() ? hostName.trim() : 'Host';
+      const resolvedRoomName = sanitizeRoomName(roomName);
+      const resolvedStructure = normalizeStructureValue(structure);
+      const resolvedColor = normalizeIdentityColor(hostColor);
+      const resolvedCodeWord = sanitizeCodeWord(hostCodeWord);
 
-    const roomId = generateRoomId();
-    const hostPeerId = generatePeerId();
+      const roomId = generateRoomId();
+      const hostPeerId = generatePeerId();
 
     const roomsCollection = firestore.collection('rooms');
     const roomRef = roomsCollection.doc(roomId);
@@ -856,7 +1017,7 @@ const createRoomRecord = async ({ hostUid, hostName, roomName, structure }) =>
       });
 
       // Host player document (device lock + identity)
-      transaction.set(playersRef, {
+      const hostPlayerPayload = {
         uid: hostUid,
         deviceId,
         peerId: hostPeerId,
@@ -864,10 +1025,15 @@ const createRoomRecord = async ({ hostUid, hostName, roomName, structure }) =>
         isHost: true,
         name: resolvedName,
         nick: resolvedName,
+        color: resolvedColor,
         joinedAt: ts,
         lastSeenAt: ts,
         hp: 100,
-      });
+      };
+      if (resolvedCodeWord) {
+        hostPlayerPayload.codeWord = resolvedCodeWord;
+      }
+      transaction.set(playersRef, hostPlayerPayload);
     });
 
     // Defensive post-commit touch (keeps lastActivity fresh; safe if identical)
@@ -911,10 +1077,22 @@ const createRoomRecord = async ({ hostUid, hostName, roomName, structure }) =>
       options && typeof options === 'object' && typeof options.structure === 'string'
         ? options.structure
         : '';
+    const hostColorOption =
+      options && typeof options === 'object' && typeof options.color === 'string'
+        ? options.color
+        : '';
+    const hostCodeWordOption =
+      options && typeof options === 'object' && typeof options.codeWord === 'string'
+        ? options.codeWord
+        : '';
     const resolvedHostName = hostName && hostName.trim() ? hostName.trim() : 'Host';
+    const resolvedHostColor = normalizeIdentityColor(hostColorOption);
+    const resolvedHostCodeWord = sanitizeCodeWord(hostCodeWordOption);
     const record = await createRoomRecord({
       hostUid: currentUser.uid,
       hostName: resolvedHostName,
+      hostColor: resolvedHostColor,
+      hostCodeWord: resolvedHostCodeWord,
       roomName: roomNameOption,
       structure: structureOption,
     });
@@ -925,6 +1103,8 @@ const createRoomRecord = async ({ hostUid, hostName, roomName, structure }) =>
     netState.peerId = hostPeerId;
     netState.isHost = true;
     netState.playerName = resolvedHostName;
+    netState.playerColor = resolvedHostColor;
+    netState.playerCodeWord = resolvedHostCodeWord || null;
     netState.roomName = createdRoomName;
     netState.roomStructure = createdStructure;
     netState.shareUrl = shareUrl;
@@ -937,6 +1117,8 @@ const createRoomRecord = async ({ hostUid, hostName, roomName, structure }) =>
       hostPeerId,
       shareUrl,
       name: resolvedHostName,
+      color: resolvedHostColor,
+      codeWord: resolvedHostCodeWord,
       roomName: createdRoomName,
       structure: createdStructure,
     });
@@ -946,6 +1128,8 @@ const createRoomRecord = async ({ hostUid, hostName, roomName, structure }) =>
       hostPeerId,
       shareUrl,
       name: resolvedHostName,
+      color: resolvedHostColor,
+      codeWord: resolvedHostCodeWord,
       roomName: createdRoomName,
       structure: createdStructure,
     };
@@ -990,7 +1174,17 @@ const { auth, user } = guardResult || (await ensureSignedInUser());
       throw new Error('Unable to determine the authenticated user.');
     }
     const playersName = typeof options === 'string' ? options : options && options.name;
+    const playerColorOption =
+      options && typeof options === 'object' && typeof options.color === 'string'
+        ? options.color
+        : '';
+    const playerCodeWordOption =
+      options && typeof options === 'object' && typeof options.codeWord === 'string'
+        ? options.codeWord
+        : '';
     const resolvedName = playersName && playersName.trim() ? playersName.trim() : 'Player';
+    const resolvedColor = normalizeIdentityColor(playerColorOption);
+    const resolvedCodeWord = sanitizeCodeWord(playerCodeWordOption);
     const trimmedRoomId = sanitizeRoomId(roomId);
     if (!trimmedRoomId) {
       throw new Error('Room ID is invalid.');
@@ -1043,10 +1237,15 @@ const { auth, user } = guardResult || (await ensureSignedInUser());
           isHost: false,
           deviceId,
           nick: resolvedName,
+          name: resolvedName,
+          color: resolvedColor,
           lastSeenAt: timestamp,
         };
         if (!alreadyPresent) {
           playerData.joinedAt = timestamp;
+        }
+        if (resolvedCodeWord) {
+          playerData.codeWord = resolvedCodeWord;
         }
 
         // Write player doc
@@ -1079,6 +1278,8 @@ const { auth, user } = guardResult || (await ensureSignedInUser());
     netState.peerId = peerId;
     netState.isHost = false;
     netState.playerName = resolvedName;
+    netState.playerColor = resolvedColor;
+    netState.playerCodeWord = resolvedCodeWord || null;
     netState.shareUrl = buildShareUrl(trimmedRoomId);
     netState.initialized = true;
 
@@ -1088,9 +1289,11 @@ const { auth, user } = guardResult || (await ensureSignedInUser());
       roomId: trimmedRoomId,
       peerId,
       name: resolvedName,
+      color: resolvedColor,
+      codeWord: resolvedCodeWord,
     });
 
-    return { roomId: trimmedRoomId, peerId, name: resolvedName };
+    return { roomId: trimmedRoomId, peerId, name: resolvedName, color: resolvedColor, codeWord: resolvedCodeWord };
   };
 
   const deleteCollectionDocs = async (collectionRef, batchSize = 50) =>
@@ -1223,6 +1426,38 @@ return withFirestoreErrorHandling('update', async () => {
   return docs.length;
 });
 
+};
+
+  const playerIdentityMarkup = (options = {}) => {
+    const identity = getPlayerIdentity();
+    const missingMessageRaw = options && typeof options.missingMessage === 'string' ? options.missingMessage : '';
+    const missingMessage = missingMessageRaw && missingMessageRaw.trim()
+      ? missingMessageRaw.trim()
+      : 'Enter your player code to continue.';
+    if (!identity) {
+      return `
+        <div class="stickfight-identity-card stickfight-identity-card--missing">
+          <div class="stickfight-identity-card__label">Player Identity</div>
+          <div class="stickfight-identity-card__body">
+            <p>${escapeHtml(missingMessage)}</p>
+            <a class="stickfight-inline-link" href="#/enter">Enter code</a>
+          </div>
+        </div>
+      `;
+    }
+    const color = escapeHtml(identity.color || DEFAULT_IDENTITY_COLOR);
+    const name = escapeHtml(identity.name || 'Player');
+    const codeWord = escapeHtml(identity.codeWord || '----');
+    return `
+      <div class="stickfight-identity-card">
+        <div class="stickfight-identity-card__swatch" style="background: ${color};"></div>
+        <div class="stickfight-identity-card__body">
+          <div class="stickfight-identity-card__label">Signed in as</div>
+          <div class="stickfight-identity-card__name">${name}</div>
+          <div class="stickfight-identity-card__meta">Code word: ${codeWord}</div>
+        </div>
+      </div>
+    `;
   };
 
   const roomsSectionMarkup = (includeAdminButton = true) => `
@@ -1813,6 +2048,62 @@ await withFirestoreErrorHandling('listen', async () => {
         color: rgba(210, 226, 255, 0.82);
         line-height: 1.55;
       }
+      .stickfight-identity-card {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 16px 18px;
+        border: 1px solid rgba(11, 180, 255, 0.35);
+        border-radius: 12px;
+        background: rgba(9, 18, 32, 0.7);
+        box-shadow: 0 14px 28px rgba(2, 6, 14, 0.4);
+        margin-bottom: 20px;
+      }
+      .stickfight-identity-card__swatch {
+        width: 44px;
+        height: 44px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.35);
+        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+      }
+      .stickfight-identity-card__body {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .stickfight-identity-card__label {
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: rgba(182, 235, 255, 0.75);
+      }
+      .stickfight-identity-card__name {
+        font-size: 1.2rem;
+        font-weight: 700;
+        color: #ffffff;
+      }
+      .stickfight-identity-card__meta {
+        font-size: 0.95rem;
+        color: rgba(210, 226, 255, 0.8);
+      }
+      .stickfight-identity-card--missing {
+        border-color: rgba(255, 173, 88, 0.45);
+        background: rgba(45, 24, 6, 0.65);
+        box-shadow: 0 14px 32px rgba(32, 12, 0, 0.45);
+      }
+      .stickfight-identity-card--missing p {
+        margin: 0 0 6px;
+        color: rgba(255, 221, 189, 0.85);
+      }
+      .stickfight-inline-link {
+        color: #49c3ff;
+        text-decoration: none;
+        font-weight: 600;
+      }
+      .stickfight-inline-link:hover {
+        color: #8fe6ff;
+        text-decoration: underline;
+      }
       .stickfight-lobby-form {
         display: flex;
         flex-direction: column;
@@ -2071,12 +2362,14 @@ await withFirestoreErrorHandling('listen', async () => {
       <header class="topbar">
         <nav class="nav">
           ${navLink('lobby', 'link-lobby', 'Lobby')}
+          ${navLink('enter', 'link-enter', 'Enter Code')}
           ${navLink('admin', 'link-admin', 'Admin')}
           ${navLink('join', 'link-join', 'Join Table')}
         </nav>
       </header>
       <main class="stickfight-main">
         ${viewSection('lobby')}
+        ${viewSection('enter')}
         ${viewSection('admin')}
         ${viewSection('join')}
       </main>
@@ -2128,6 +2421,10 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     showOverlay();
     overlayState.contentLocked = false;
+    const identity = getPlayerIdentity();
+    const identityMarkup = playerIdentityMarkup({
+      missingMessage: 'Enter your player code before hosting or joining games.',
+    });
     const structureOptions = resolveRoomStructureOptions();
     const selectedStructure = overlayState.selectedStructure || getDefaultRoomStructure();
     const structureOptionsMarkup = structureOptions
@@ -2142,36 +2439,40 @@ await withFirestoreErrorHandling('listen', async () => {
       })
       .join('');
     renderView('lobby', `
+      ${identityMarkup}
       <h2>Host a Lobby</h2>
-      <p>Create a room and share the invite link with your friends.</p>
+      <p>${escapeHtml(
+        identity
+          ? 'Create a room and share the invite link with your friends.'
+          : 'Enter your assigned code word to unlock hosting.'
+      )}</p>
       <form class="stickfight-lobby-form" id="stickfight-create-form">
         <label>
-          <span>Nickname</span>
-          <input type="text" id="stickfight-host-name" name="name" maxlength="32" autocomplete="off" placeholder="Your name" />
-        </label>
-        <label>
           <span>Room Name</span>
-          <input type="text" id="stickfight-room-name" name="roomName" maxlength="64" autocomplete="off" placeholder="Room name" required />
+          <input type="text" id="stickfight-room-name" name="roomName" maxlength="64" autocomplete="off" placeholder="Room name" required${
+            identity ? '' : ' disabled'
+          } />
         </label>
         <label>
           <span>Structure</span>
-          <select id="stickfight-room-structure" name="structure">${structureOptionsMarkup}</select>
+          <select id="stickfight-room-structure" name="structure"${identity ? '' : ' disabled'}>${structureOptionsMarkup}</select>
         </label>
         <div class="stickfight-lobby-error" id="stickfight-create-error"></div>
-        <button type="submit" class="stickfight-primary-button" id="stickfight-create-button">Create Game</button>
+        <button type="submit" class="stickfight-primary-button" id="stickfight-create-button"${
+          identity ? '' : ' disabled'
+        }>Create Game</button>
       </form>
       ${roomsSectionMarkup()}
     `);
 
     const form = overlayState.panel.querySelector('#stickfight-create-form');
-    const nameInput = overlayState.panel.querySelector('#stickfight-host-name');
     const roomNameInput = overlayState.panel.querySelector('#stickfight-room-name');
     const structureSelect = overlayState.panel.querySelector('#stickfight-room-structure');
     const errorEl = overlayState.panel.querySelector('#stickfight-create-error');
     const submitButton = overlayState.panel.querySelector('#stickfight-create-button');
 
-    if (nameInput) {
-      nameInput.focus();
+    if (roomNameInput && identity) {
+      roomNameInput.focus();
     }
 
     if (structureSelect && selectedStructure) {
@@ -2187,18 +2488,31 @@ await withFirestoreErrorHandling('listen', async () => {
     let busy = false;
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (!roomNameInput || !structureSelect || !submitButton) {
+        return;
+      }
+      const activeIdentity = getPlayerIdentity();
+      if (!activeIdentity) {
+        if (errorEl) {
+          errorEl.textContent = 'Enter your player code before hosting a lobby.';
+        }
+        return;
+      }
       if (busy) {
         return;
       }
       busy = true;
       logMessage('[ROOM]', 'create click');
-      errorEl.textContent = '';
+      if (errorEl) {
+        errorEl.textContent = '';
+      }
       submitButton.disabled = true;
-      const name = nameInput ? nameInput.value.trim() : '';
       const roomName = roomNameInput ? roomNameInput.value.trim() : '';
       const structureValue = structureSelect ? structureSelect.value : '';
       if (!roomName) {
-        errorEl.textContent = 'Room name is required.';
+        if (errorEl) {
+          errorEl.textContent = 'Room name is required.';
+        }
         submitButton.disabled = false;
         busy = false;
         if (roomNameInput) {
@@ -2207,12 +2521,20 @@ await withFirestoreErrorHandling('listen', async () => {
         return;
       }
       try {
-        const result = await createRoom({ name, roomName, structure: structureValue });
+        const result = await createRoom({
+          name: activeIdentity.name,
+          color: activeIdentity.color,
+          codeWord: activeIdentity.codeWord,
+          roomName,
+          structure: structureValue,
+        });
         overlayState.selectedStructure = structureValue;
         renderHostShare(result);
       } catch (error) {
         const message = error && error.message ? error.message : 'Unable to create the room.';
-        errorEl.textContent = message;
+        if (errorEl) {
+          errorEl.textContent = message;
+        }
         submitButton.disabled = false;
         busy = false;
       }
@@ -2342,47 +2664,107 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     showOverlay();
     overlayState.contentLocked = false;
-    overlayState.joinPrefillCode = roomId;
+    const sanitizedRoomId = sanitizeRoomId(roomId);
+    const displayRoomId = sanitizedRoomId || (roomId ? roomId.trim().toUpperCase() : '');
+    overlayState.joinPrefillCode = displayRoomId;
+    const identity = getPlayerIdentity();
+    const identityMarkup = playerIdentityMarkup({
+      missingMessage: 'Enter your player code before joining a lobby.',
+    });
     renderView('join', `
+      ${identityMarkup}
       <h2>Join Lobby</h2>
-      <p>Enter a nickname to join room <strong>${escapeHtml(roomId)}</strong>.</p>
+      <p>${escapeHtml(
+        identity
+          ? 'Confirm your details and join the selected lobby.'
+          : 'Enter your player code before joining a lobby.'
+      )}</p>
       <form class="stickfight-lobby-form" id="stickfight-join-form">
         <label>
-          <span>Nickname</span>
-          <input type="text" id="stickfight-guest-name" name="name" maxlength="32" autocomplete="off" placeholder="Your name" />
+          <span>Room Code</span>
+          <input type="text" id="stickfight-join-room-code" name="code" maxlength="12" autocomplete="off" value="${escapeHtml(
+            displayRoomId
+          )}"${identity ? '' : ' disabled'} />
         </label>
         <div class="stickfight-lobby-error" id="stickfight-join-error"></div>
-        <button type="submit" class="stickfight-primary-button" id="stickfight-join-button">Join Lobby</button>
+        <button type="submit" class="stickfight-primary-button" id="stickfight-join-button"${
+          identity ? '' : ' disabled'
+        }>Join Lobby</button>
       </form>
       ${roomsSectionMarkup()}
     `);
 
     const form = overlayState.panel.querySelector('#stickfight-join-form');
-    const nameInput = overlayState.panel.querySelector('#stickfight-guest-name');
+    const codeInput = overlayState.panel.querySelector('#stickfight-join-room-code');
     const errorEl = overlayState.panel.querySelector('#stickfight-join-error');
     const submitButton = overlayState.panel.querySelector('#stickfight-join-button');
 
-    if (nameInput) {
-      nameInput.focus();
+    if (!form) {
+      attachAdminEntryHandler();
+      updateRoomsTable();
+      return;
+    }
+
+    if (codeInput && identity) {
+      codeInput.focus();
+    }
+
+    if (codeInput) {
+      codeInput.addEventListener('input', () => {
+        const nextValue = codeInput.value ? codeInput.value.toUpperCase() : '';
+        const sanitized = nextValue.replace(/[^A-Z0-9_-]/g, '');
+        if (sanitized !== codeInput.value) {
+          codeInput.value = sanitized;
+        }
+      });
     }
 
     let busy = false;
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (!codeInput || !submitButton) {
+        return;
+      }
+      const activeIdentity = getPlayerIdentity();
+      if (!activeIdentity) {
+        if (errorEl) {
+          errorEl.textContent = 'Enter your player code before joining a lobby.';
+        }
+        return;
+      }
       if (busy) {
         return;
       }
       busy = true;
-      logMessage('[ROOM]', `join click code=${roomId}`);
-      errorEl.textContent = '';
+      const roomCodeRaw = codeInput.value ? codeInput.value.trim().toUpperCase() : '';
+      const targetCode = sanitizeRoomId(roomCodeRaw);
+      logMessage('[ROOM]', `join click code=${targetCode || roomCodeRaw}`);
+      if (errorEl) {
+        errorEl.textContent = '';
+      }
       submitButton.disabled = true;
-      const name = nameInput ? nameInput.value.trim() : '';
+      if (!targetCode) {
+        if (errorEl) {
+          errorEl.textContent = 'Enter a valid room code.';
+        }
+        submitButton.disabled = false;
+        busy = false;
+        codeInput.focus();
+        return;
+      }
+      overlayState.joinPrefillCode = targetCode;
       try {
-        const result = await joinRoom(roomId, { name });
+        const result = await joinRoom(targetCode, {
+          name: activeIdentity.name,
+          color: activeIdentity.color,
+          codeWord: activeIdentity.codeWord,
+        });
         renderJoinSuccess(result);
       } catch (error) {
         const message = error && error.message ? error.message : 'Unable to join the room.';
-        errorEl.textContent = message;
+        if (errorEl) {
+          errorEl.textContent = message;
+        }
         submitButton.disabled = false;
         busy = false;
       }
@@ -2400,18 +2782,29 @@ await withFirestoreErrorHandling('listen', async () => {
     showOverlay();
     overlayState.contentLocked = false;
     overlayState.invalidRoomLink = false;
+    const identity = getPlayerIdentity();
+    const identityMarkup = playerIdentityMarkup({
+      missingMessage: 'Enter your player code before joining a lobby.',
+    });
     renderView(
       'join',
       `
+      ${identityMarkup}
       <h2>Join Table</h2>
-      <p>Enter a room code to join an existing lobby.</p>
+      <p>${escapeHtml(
+        identity
+          ? 'Enter a room code to join an existing lobby.'
+          : 'Enter your player code before joining a lobby. Once ready, enter a room code to join an existing lobby.'
+      )}</p>
       <form class="stickfight-lobby-form" id="join-form">
         <label>
           <span>Room Code</span>
-          <input type="text" id="join-code" name="code" placeholder="Enter room code" autocomplete="off" required />
+          <input type="text" id="join-code" name="code" placeholder="Enter room code" autocomplete="off" required${
+            identity ? '' : ' disabled'
+          } />
         </label>
         <div class="stickfight-lobby-error" id="stickfight-join-code-error"></div>
-        <button type="submit" class="stickfight-primary-button">Join</button>
+        <button type="submit" class="stickfight-primary-button"${identity ? '' : ' disabled'}>Join</button>
       </form>
       ${roomsSectionMarkup()}
     `
@@ -2421,20 +2814,41 @@ await withFirestoreErrorHandling('listen', async () => {
     const input = overlayState.panel.querySelector('#join-code');
     const errorEl = overlayState.panel.querySelector('#stickfight-join-code-error');
 
+    if (input) {
+      input.addEventListener('input', () => {
+        const next = input.value ? input.value.toUpperCase() : '';
+        const sanitized = next.replace(/[^A-Z0-9_-]/g, '');
+        if (sanitized !== input.value) {
+          input.value = sanitized;
+        }
+      });
+    }
+
     if (input && overlayState.joinPrefillCode) {
       input.value = overlayState.joinPrefillCode;
-      input.focus();
-    } else if (input) {
+      if (identity) {
+        input.focus();
+      }
+    } else if (input && identity) {
       input.focus();
     }
 
     if (!form) {
+      attachAdminEntryHandler();
+      updateRoomsTable();
       return;
     }
 
     form.addEventListener('submit', (event) => {
       event.preventDefault();
       if (!input) {
+        return;
+      }
+      const activeIdentity = getPlayerIdentity();
+      if (!activeIdentity) {
+        if (errorEl) {
+          errorEl.textContent = 'Enter your player code before joining a lobby.';
+        }
         return;
       }
       const rawCode = input.value ? input.value.trim().toUpperCase() : '';
@@ -2455,6 +2869,104 @@ await withFirestoreErrorHandling('listen', async () => {
 
     attachAdminEntryHandler();
     updateRoomsTable();
+  };
+
+  const renderEnterView = () => {
+    if (overlayState.fatalError) {
+      showOverlay();
+      return;
+    }
+    showOverlay();
+    overlayState.contentLocked = false;
+    const identity = getPlayerIdentity();
+    const identityMarkup = playerIdentityMarkup({
+      missingMessage: 'Enter the 4-letter code word provided by the host to unlock your player identity.',
+    });
+    renderView(
+      'enter',
+      `
+      <h2>Enter Player Code</h2>
+      <p>${escapeHtml(
+        identity
+          ? 'Update or confirm your Stick Fight identity by entering a new code word.'
+          : 'Enter your assigned 4-letter code word to unlock your Stick Fight identity.'
+      )}</p>
+      ${identityMarkup}
+      <form class="stickfight-lobby-form" id="stickfight-enter-form">
+        <label>
+          <span>Code Word</span>
+          <input type="text" id="stickfight-enter-code" name="codeWord" maxlength="4" autocomplete="off" placeholder="ABCD" required />
+        </label>
+        <div class="stickfight-lobby-error" id="stickfight-enter-error"></div>
+        <button type="submit" class="stickfight-primary-button" id="stickfight-enter-submit">Save Identity</button>
+      </form>
+    `,
+    );
+
+    const form = overlayState.panel.querySelector('#stickfight-enter-form');
+    const input = overlayState.panel.querySelector('#stickfight-enter-code');
+    const errorEl = overlayState.panel.querySelector('#stickfight-enter-error');
+    const submitButton = overlayState.panel.querySelector('#stickfight-enter-submit');
+
+    if (!form) {
+      return;
+    }
+
+    if (input) {
+      input.focus();
+      input.addEventListener('input', () => {
+        const next = input.value ? input.value.toUpperCase() : '';
+        const sanitized = next.replace(/[^A-Z]/g, '').slice(0, 4);
+        if (sanitized !== input.value) {
+          input.value = sanitized;
+        }
+      });
+    }
+
+    let busy = false;
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!input || !submitButton) {
+        return;
+      }
+      if (busy) {
+        return;
+      }
+      const codeValue = input.value ? input.value.toUpperCase() : '';
+      const sanitized = sanitizeCodeWord(codeValue);
+      if (!sanitized) {
+        if (errorEl) {
+          errorEl.textContent = 'Enter a valid 4-letter code word.';
+        }
+        input.focus();
+        return;
+      }
+      busy = true;
+      if (errorEl) {
+        errorEl.textContent = '';
+      }
+      submitButton.disabled = true;
+      try {
+        const fetchedIdentity = await fetchPlayerIdentityByCodeWord(sanitized);
+        if (!fetchedIdentity) {
+          if (errorEl) {
+            errorEl.textContent = 'That code word could not be found. Double-check and try again.';
+          }
+          submitButton.disabled = false;
+          busy = false;
+          return;
+        }
+        setPlayerIdentity(fetchedIdentity);
+        goToRoute('#/lobby');
+      } catch (error) {
+        const message = error && error.message ? error.message : 'Unable to verify the code word.';
+        if (errorEl) {
+          errorEl.textContent = message;
+        }
+        submitButton.disabled = false;
+        busy = false;
+      }
+    });
   };
 
   const renderJoinSuccess = (result) => {
@@ -2516,7 +3028,7 @@ await withFirestoreErrorHandling('listen', async () => {
   };
 
   const normalizeRouteKey = (value) => {
-    if (value === '#/admin' || value === '#/join' || value === '#/lobby') {
+    if (value === '#/admin' || value === '#/join' || value === '#/lobby' || value === '#/enter') {
       return value;
     }
     if (value === '#admin') {
@@ -2524,6 +3036,9 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     if (value === '#join') {
       return '#/join';
+    }
+    if (value === '#enter') {
+      return '#/enter';
     }
     if (value === '#lobby') {
       return '#/lobby';
@@ -2555,6 +3070,9 @@ await withFirestoreErrorHandling('listen', async () => {
         } else {
           renderJoinTableView();
         }
+        break;
+      case '#/enter':
+        renderEnterView();
         break;
       case '#/lobby':
       default:
@@ -2672,6 +3190,12 @@ await withFirestoreErrorHandling('listen', async () => {
     adminDeleteRoomByCode,
     adminDeleteAllRooms,
     adminAddPlayer,
+    identity: {
+      get: getPlayerIdentity,
+      set: setPlayerIdentity,
+      clear: clearPlayerIdentity,
+      fetchByCodeWord: fetchPlayerIdentityByCodeWord,
+    },
     showAdminPanel: () => {
       overlayState.isAdmin = true;
       goToRoute('#/admin');
