@@ -35,6 +35,7 @@
   const netState = {
     initialized: false,
     firestore: null,
+    functions: null,
     fieldValue: null,
     auth: null,
     roomId: null,
@@ -174,6 +175,23 @@
       netState.fieldValue = firebase.firestore.FieldValue;
     }
     return firestoreInstance;
+  };
+
+  const ensureFunctions = () => {
+    if (netState.functions) {
+      return netState.functions;
+    }
+    const firebase = firebaseNamespace();
+    if (!firebase || typeof firebase.functions !== 'function') {
+      throw new Error('Functions SDK is not available.');
+    }
+    const app = ensureFirebaseApp();
+    const functionsInstance = firebase.functions(app);
+    if (!functionsInstance) {
+      throw new Error('Functions SDK is not available.');
+    }
+    netState.functions = functionsInstance;
+    return functionsInstance;
   };
 
   const ensureKeyVerification = async () => {
@@ -1204,7 +1222,11 @@ await withFirestoreErrorHandling('listen', async () => {
     const promptFn = typeof window !== 'undefined' && typeof window.prompt === 'function' ? window.prompt : null;
     const alertFn = typeof window !== 'undefined' && typeof window.alert === 'function' ? window.alert : null;
     const code = promptFn ? promptFn('Enter admin code') : null;
-    if (code === '808080') {
+    const trimmedCode = typeof code === 'string' ? code.trim() : '';
+    if (code !== null) {
+      logMessage('[ADMIN]', 'code-entered');
+    }
+    if (trimmedCode === '808080') {
       try {
         overlayState.adminOverride = true;
         await ensureAdminPrivileges({ forceRefresh: true });
@@ -1224,9 +1246,73 @@ await withFirestoreErrorHandling('listen', async () => {
           alertFn(message);
         }
       }
-    } else if (code && code.trim()) {
-      if (alertFn) {
-        alertFn('Invalid admin code.');
+    } else if (trimmedCode) {
+      if (bootFlags && bootFlags.safe) {
+        if (alertFn) {
+          alertFn('Invalid admin code.');
+        }
+        return;
+      }
+      if (NETWORK_DISABLED) {
+        if (alertFn) {
+          alertFn('Invalid admin code.');
+        }
+        return;
+      }
+      try {
+        const { auth, user } = await ensureSignedInUser();
+        const firebase = firebaseNamespace();
+        if (!firebase || typeof firebase.functions !== 'function') {
+          throw new Error('Firebase Functions SDK is not available.');
+        }
+        const app = ensureFirebaseApp();
+        const functions = firebase.functions(app);
+        if (!functions || typeof functions.httpsCallable !== 'function') {
+          throw new Error('Firebase Functions SDK is not available.');
+        }
+        const callable = functions.httpsCallable('grantAdminByCode');
+        await callable({ code: trimmedCode });
+        logMessage('[ADMIN]', 'claim-grant call=ok');
+
+        const activeAuth = auth || ensureAuth();
+        const currentUser = (activeAuth && activeAuth.currentUser) || user || null;
+        if (!currentUser || typeof currentUser.getIdToken !== 'function' || typeof currentUser.getIdTokenResult !== 'function') {
+          throw new Error('Unable to refresh admin token.');
+        }
+
+        await currentUser.getIdToken(true);
+        const tokenResult = await currentUser.getIdTokenResult();
+        const claims = (tokenResult && tokenResult.claims) || {};
+        const hasAdminClaim = claimsContainAdmin(claims);
+        logMessage('[ADMIN]', `token-refreshed admin=${hasAdminClaim ? 'true' : 'false'}`);
+        overlayState.claims = claims;
+
+        if (!hasAdminClaim) {
+          overlayState.isAdmin = false;
+          setBannerMessage('[ADMIN][WARN] Admin privileges are still pending. Please try again later.');
+          return;
+        }
+
+        try {
+          await ensureAdminPrivileges({ forceRefresh: true });
+        } catch (error) {
+          logMessage('[ADMIN]', 'claim-verification failed', error);
+          overlayState.isAdmin = false;
+          setBannerMessage('[ADMIN][ERR] Failed to verify admin privileges.');
+          return;
+        }
+
+        overlayState.isAdmin = true;
+        overlayState.adminOverride = false;
+        setBannerMessage(null);
+        renderAdminPanel();
+      } catch (error) {
+        logMessage('[ADMIN]', 'claim-grant error', error);
+        overlayState.isAdmin = false;
+        if (alertFn) {
+          const message = error && typeof error.message === 'string' ? error.message : 'Invalid admin code.';
+          alertFn(message);
+        }
       }
     }
   };
@@ -1264,6 +1350,11 @@ await withFirestoreErrorHandling('listen', async () => {
         </form>
         <div class="stickfight-admin-status" id="stickfight-admin-status"></div>
         <div style="display: flex; justify-content: flex-end; gap: 12px;">
+          ${
+            overlayState.isAdmin
+              ? '<button type="button" class="stickfight-secondary-button" id="stickfight-admin-signout">Sign out admin</button>'
+              : ''
+          }
           <button type="button" class="stickfight-secondary-button" id="stickfight-admin-back">Back</button>
         </div>
       </div>
@@ -1336,6 +1427,69 @@ await withFirestoreErrorHandling('listen', async () => {
         } catch (error) {
           const message = error && error.message ? error.message : 'Failed to delete rooms.';
           setStatus(message);
+        }
+      });
+    }
+
+    const signOutButton = overlayState.panel.querySelector('#stickfight-admin-signout');
+    if (signOutButton) {
+      signOutButton.addEventListener('click', async () => {
+        if (signOutButton.disabled) {
+          return;
+        }
+        signOutButton.disabled = true;
+        setStatus('Revoking admin access...');
+        try {
+          const { auth, user } = await ensureSignedInUser();
+          const currentUser = user || (auth && auth.currentUser) || null;
+          if (!currentUser || typeof currentUser.getIdToken !== 'function') {
+            throw new Error('No authenticated user available.');
+          }
+
+          const callableResult = await withFirestoreErrorHandling('callable/revokeAdmin', async () => {
+            const functions = ensureFunctions();
+            if (!functions || typeof functions.httpsCallable !== 'function') {
+              throw new Error('Cloud Functions callable is not available.');
+            }
+            const callable = functions.httpsCallable('revokeAdmin');
+            return callable();
+          });
+
+          try {
+            await currentUser.getIdToken(true);
+          } catch (tokenError) {
+            logMessage('[ADMIN]', 'revoke-admin token refresh failed', tokenError);
+          }
+
+          let refreshedClaims = null;
+          try {
+            if (typeof currentUser.getIdTokenResult === 'function') {
+              const tokenResult = await currentUser.getIdTokenResult(true);
+              refreshedClaims = tokenResult && tokenResult.claims ? tokenResult.claims : null;
+            }
+          } catch (claimsError) {
+            logMessage('[ADMIN]', 'revoke-admin claims refresh failed', claimsError);
+          }
+
+          overlayState.claims = refreshedClaims;
+          overlayState.isAdmin = false;
+          overlayState.adminOverride = false;
+          _adminCheckPromise = null;
+          setBannerMessage(null);
+
+          const callableData =
+            callableResult && typeof callableResult === 'object' && Object.prototype.hasOwnProperty.call(callableResult, 'data')
+              ? callableResult.data
+              : callableResult;
+          logMessage('[ADMIN]', 'revoke-admin complete', { result: callableData, claims: refreshedClaims });
+
+          setStatus('Admin access revoked.');
+          hideOverlay();
+        } catch (error) {
+          logMessage('[ADMIN]', 'revoke-admin failed', error);
+          const message = error && error.message ? error.message : 'Failed to revoke admin access.';
+          setStatus(message);
+          signOutButton.disabled = false;
         }
       });
     }
@@ -1982,6 +2136,7 @@ await withFirestoreErrorHandling('listen', async () => {
   global.StickFightNet = Object.assign(namespace, {
     state: netState,
     ensureFirestore,
+    ensureFunctions,
     ensureAuth,
     ensureSignedInUser,
     ensureAuthReady,

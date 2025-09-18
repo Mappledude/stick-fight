@@ -40,3 +40,8 @@ Ensure the following domains are listed under **Authentication → Settings → 
 - `stick-fight-pigeon.firebaseapp.com`
 
 Requests originating from other domains will be blocked by Firebase Authentication.
+
+## Acceptance evidence
+
+- Updated Firestore rules to use the new authentication model for rooms, players, and signals.
+- Attempted to redeploy the rules with `firebase deploy --only firestore:rules --project stick-fight-pigeon`; complete the command from an authenticated environment to publish the changes.
