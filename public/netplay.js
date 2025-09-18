@@ -509,10 +509,11 @@ runtime.tick = runtime.hostTick;
           }
 
           runtime.playerPeerIdsByUid[uid] = peerId;
-          const name = data.name || 'Player';
+          const name = data.nick || data.name || 'Player';
           updatePlayerDirectory(peerId, name);
 
-          if (!runtime.slotAssignments.p1 && data.isHost) {
+          const isHostPlayer = typeof data.role === 'string' ? data.role === 'host' : !!data.isHost;
+          if (!runtime.slotAssignments.p1 && isHostPlayer) {
             runtime.slotAssignments.p1 = peerId;
           }
 

@@ -98,6 +98,8 @@ const MobileControls: React.FC = () => {
         const width = typeof window !== 'undefined' ? window.innerWidth : 0;
         const height = typeof window !== 'undefined' ? window.innerHeight : 0;
         if (typeof console !== 'undefined' && console && typeof console.log === 'function') {
+          const platformLabel = isDesktop() ? 'desktop' : 'mobile';
+          console.log(`[CONTROLS] mounted uid=${user.uid} (${platformLabel})`);
           console.log(`[INPUT] controls-mounted uid=${user.uid} deviceId=${deviceId} vw=${width}x${height}`);
         }
       })
