@@ -55,6 +55,7 @@
     pendingFatalMessage: null,
     contentLocked: false,
     overlayInitRequested: false,
+    bannerMessage: null,
   };
 
   const lobbyRoomsState = {
@@ -598,74 +599,148 @@ function ensureAuthReady() {
     console.log(`${label} ${message}`);
   };
 
-  const createRoomRecord = async ({ hostUid, hostName }) => {
+// ---------- Overlay error banner + Firestore error handling ----------
+
+const ensureBannerElement = () => {
+  if (!overlayState.panel) return null;
+  if (typeof document === 'undefined') return null;
+
+  let banner = overlayState.panel.querySelector('[data-stickfight-error-banner]');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.className = 'stickfight-error-banner';
+    banner.setAttribute('data-stickfight-error-banner', 'true');
+    banner.setAttribute('hidden', 'hidden');
+    overlayState.panel.insertBefore(banner, overlayState.panel.firstChild);
+  }
+  return banner;
+};
+
+const applyBannerMessage = () => {
+  const banner = ensureBannerElement();
+  if (!banner) return;
+  const message = overlayState.bannerMessage;
+  if (message) {
+    banner.textContent = message;
+    banner.removeAttribute('hidden');
+  } else {
+    banner.textContent = '';
+    banner.setAttribute('hidden', 'hidden');
+  }
+};
+
+const setBannerMessage = (message) => {
+  overlayState.bannerMessage = message || null;
+  if (overlayState.bannerMessage) {
+    createStyles();
+    ensureOverlay();
+    if (overlayState.overlay) {
+      overlayState.overlay.classList.remove('stickfight-hidden');
+    }
+  }
+  applyBannerMessage();
+};
+
+const formatFirestoreErrorDetails = (op, error) => {
+  const code = error && typeof error.code === 'string' ? error.code : 'unknown';
+  const rawMessage =
+    error && typeof error.message === 'string' && error.message
+      ? error.message
+      : String(error);
+  return { code, message: rawMessage, formatted: `op=${op} code=${code} msg=${rawMessage}` };
+};
+
+const handleFirestoreError = (op, error) => {
+  const details = formatFirestoreErrorDetails(op, error);
+  const alreadyLogged =
+    error && typeof error === 'object' && Object.prototype.hasOwnProperty.call(error, '__stickfightFsLogged');
+  if (!alreadyLogged) {
+    logMessage('[FS][ERR]', details.formatted, error);
+    if (error && typeof error === 'object') {
+      try { error.__stickfightFsLogged = true; } catch (_) { /* ignore RO errors */ }
+    }
+  }
+  setBannerMessage(`[FS][ERR] ${details.formatted}`);
+};
+
+const withFirestoreErrorHandling = async (op, action) => {
+  try {
+    return await action();
+  } catch (error) {
+    handleFirestoreError(op, error);
+    throw error;
+  }
+};
+
+// ---------- Room creation (host) with device-lock & metadata ----------
+
+const createRoomRecord = async ({ hostUid, hostName }) =>
+  withFirestoreErrorHandling('create', async () => {
     const firestore = ensureFirestore();
     const resolvedName = hostName && hostName.trim() ? hostName.trim() : 'Host';
+
     const roomId = generateRoomId();
     const hostPeerId = generatePeerId();
+
     const roomsCollection = firestore.collection('rooms');
     const roomRef = roomsCollection.doc(roomId);
     const playersRef = roomRef.collection('players').doc(hostUid);
-    const deviceId = getDeviceId();
+
+    const deviceId =
+      typeof getDeviceId === 'function'
+        ? getDeviceId()
+        : (window.NetUI && typeof window.NetUI.getDeviceId === 'function'
+            ? window.NetUI.getDeviceId()
+            : null);
+
+    const ts =
+      (typeof getServerTimestamp === 'function' && getServerTimestamp()) ||
+      (typeof getTimestampValue === 'function' && getTimestampValue()) ||
+      new Date();
+
     await runTransaction(async (transaction) => {
       const existing = await transaction.get(roomRef);
       if (existing && existing.exists) {
         throw new Error('A room with this ID already exists. Please try again.');
       }
+
+      // Room metadata (authoritative fields set at creation)
       transaction.set(roomRef, {
         code: roomId,
         status: 'open',
         active: true,
         maxPlayers: 9,
-        createdAt: getServerTimestamp(),
+        createdAt: ts,
+        updatedAt: ts,
+        lastActivityAt: ts,
+        hostPeerId,
+        hostUid,
+        playerCount: 1,
       });
+
+      // Host player document (device lock + identity)
       transaction.set(playersRef, {
         uid: hostUid,
         deviceId,
+        peerId: hostPeerId,
+        role: 'host',
+        isHost: true,
+        name: resolvedName,
         nick: resolvedName,
-        joinedAt: getServerTimestamp(),
-        lastSeenAt: getServerTimestamp(),
+        joinedAt: ts,
+        lastSeenAt: ts,
+        hp: 100,
       });
     });
-// --- room metadata (host + activity) ---
-const nowTs = typeof getServerTimestamp === 'function' ? getServerTimestamp() : getTimestampValue();
-const metadataUpdate = {
-  hostPeerId,
-  hostUid,
-  playerCount: 1,
-  updatedAt: nowTs,
-  lastActivityAt: nowTs,
-  // keep existing fields like status/active/maxPlayers elsewhere in your flow
-};
 
-try {
-  await roomRef.set(metadataUpdate, { merge: true });
-} catch (error) {
-  logMessage('[ROOM]', `failed to update metadata for code=${roomId}`, error);
-}
+    // Defensive post-commit touch (keeps lastActivity fresh; safe if identical)
+    try {
+      await roomRef.set({ updatedAt: ts, lastActivityAt: ts }, { merge: true });
+    } catch (error) {
+      logMessage('[ROOM]', `failed to update metadata for code=${roomId}`, error);
+    }
 
-// --- host player document (claim + identity) ---
-try {
-  await playersRef.set(
-    {
-      uid: hostUid,
-      deviceId: typeof getDeviceId === 'function' ? getDeviceId() : deviceId,
-      peerId: hostPeerId,
-      role: 'host',
-      isHost: true,
-      name: resolvedName,
-      nick: resolvedName,
-      joinedAt: nowTs,
-      lastSeenAt: nowTs,
-      hp: 100,
-    },
-    { merge: true }
-  );
-} catch (error) {
-  logMessage('[ROOM]', `failed to update host player metadata code=${roomId}`, error);
-}
-
-logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`);
+    logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`);
 
     return {
       roomId,
@@ -673,7 +748,8 @@ logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`
       hostUid,
       hostName: resolvedName,
     };
-  };
+  });
+
 
   const createRoom = async (options) => {
     logConfigScope('room-create');
@@ -714,13 +790,38 @@ logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`
 
   const joinRoom = async (roomId, options) => {
     logConfigScope('room-join');
-    let guardResult = null;
-    if (!bootFlags.safe) {
-      guardResult = await ensureAppAndUser();
-      logAppAndUserGuard(guardResult);
+// Init/auth guard with safe-mode support
+let guardResult = null;
+
+if (!bootFlags.safe) {
+  if (typeof ensureAppAndUser === 'function') {
+    // Preferred: centralized app+auth guard (returns { app, auth, user })
+    guardResult = await ensureAppAndUser();
+  } else {
+    // Fallback: legacy path (compat)
+    if (typeof ensureAuthReady === 'function') {
+      await ensureAuthReady();
     }
-    const firestore = ensureFirestore();
-    const { auth, user } = guardResult || (await ensureSignedInUser());
+    // Try to reuse the canonical bootstrap if present
+    let app = null;
+    if (window.FirebaseBootstrap && typeof FirebaseBootstrap.initFirebase === 'function') {
+      app = FirebaseBootstrap.initFirebase();
+    }
+    const signed = window.FirebaseBootstrap && typeof FirebaseBootstrap.ensureSignedInUser === 'function'
+      ? await FirebaseBootstrap.ensureSignedInUser()
+      : await ensureSignedInUser();
+    guardResult = { app: app || signed.app, auth: signed.auth, user: signed.user };
+  }
+
+  if (typeof logAppAndUserGuard === 'function') {
+    try { logAppAndUserGuard(guardResult); } catch (_) { /* noop */ }
+  }
+}
+
+// Firestore after app/auth (no-op in safe mode)
+const firestore = ensureFirestore();
+const { auth, user } = guardResult || (await ensureSignedInUser());
+
     const currentUser = user || (auth && auth.currentUser);
     if (!currentUser || !currentUser.uid) {
       throw new Error('Unable to determine the authenticated user.');
@@ -731,54 +832,111 @@ logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`
     if (!trimmedRoomId) {
       throw new Error('Room ID is invalid.');
     }
-    const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
     const peerId = generatePeerId();
-    const deviceId = getDeviceId();
-    const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
-    const playersCollection = roomRef.collection('players');
-    const [existingPlayerDoc, playersSnapshot] = await Promise.all([
-      playerDocRef.get(),
-      playersCollection.get(),
-    ]);
-    const alreadyPresent = !!(existingPlayerDoc && existingPlayerDoc.exists);
+let alreadyPresent = false;
 
-    await runTransaction(async (transaction) => {
-      const roomSnapshot = await transaction.get(roomRef);
-      if (!roomSnapshot || !roomSnapshot.exists) {
-        throw new Error('The requested room could not be found.');
-      }
-      const roomData = roomSnapshot.data() || {};
-      const maxPlayers = typeof roomData.maxPlayers === 'number' ? roomData.maxPlayers : 9;
-      if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
-        throw new Error('This room is already full.');
-      }
-      const playerData = {
-        uid: currentUser.uid,
-        deviceId,
-        nick: resolvedName,
-        lastSeenAt: getServerTimestamp(),
-      };
-      if (!alreadyPresent) {
-        playerData.joinedAt = getServerTimestamp();
-      }
-      if (alreadyPresent) {
-        transaction.update(playerDocRef, playerData);
+await withFirestoreErrorHandling('update', async () => {
+  const firestore = ensureFirestore();
+  const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
+
+  const getST =
+    (typeof getServerTimestamp === 'function' && getServerTimestamp) ||
+    (() => (typeof getTimestampValue === 'function' ? getTimestampValue() : new Date()));
+
+  const deviceId =
+    (typeof getDeviceId === 'function' && getDeviceId()) ||
+    (window.NetUI && typeof window.NetUI.getDeviceId === 'function' ? window.NetUI.getDeviceId() : null);
+
+  const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
+  const playersCollection = roomRef.collection('players');
+
+  // Pre-read for presence & capacity snapshot
+  const [existingPlayerDoc, playersSnapshot] = await Promise.all([
+    playerDocRef.get(),
+    playersCollection.get(),
+  ]);
+  alreadyPresent = !!(existingPlayerDoc && existingPlayerDoc.exists);
+
+  await runTransaction(async (transaction) => {
+    // Room existence
+    const roomSnapshot = await transaction.get(roomRef);
+    if (!roomSnapshot || !roomSnapshot.exists) {
+      throw new Error('The requested room could not be found.');
+    }
+
+    const roomData = roomSnapshot.data() || {};
+    const maxPlayers = typeof roomData.maxPlayers === 'number' ? roomData.maxPlayers : 9;
+
+    // Capacity guard
+    if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
+      throw new Error('This room is already full.');
+    }
+
+    // Player payload (device-lock + identity)
+    const playerData = {
+      uid: currentUser.uid,
+      deviceId,
+      nick: resolvedName,
+      lastSeenAt: getST(),
+    };
+    if (!alreadyPresent) {
+      playerData.joinedAt = getST();
+    }
+
+    // Write player doc
+    if (alreadyPresent) {
+      transaction.update(playerDocRef, playerData);
+    } else {
+      transaction.set(playerDocRef, playerData);
+    }
+
+    // Room metadata touch (+increment playerCount on first join)
+    const updates = {
+      updatedAt: getST(),
+      lastActivityAt: getST(),
+    };
+    if (!alreadyPresent) {
+      if (netState.fieldValue && typeof netState.fieldValue.increment === 'function') {
+        updates.playerCount = netState.fieldValue.increment(1);
       } else {
-        transaction.set(playerDocRef, playerData);
+        const currentCount =
+          typeof roomData.playerCount === 'number' ? roomData.playerCount : playersSnapshot.size;
+        updates.playerCount = currentCount + 1;
       }
-      const updates = {
-        updatedAt: getServerTimestamp(),
-        lastActivityAt: getServerTimestamp(),
-      };
-      if (!alreadyPresent) {
-        if (netState.fieldValue && typeof netState.fieldValue.increment === 'function') {
-          updates.playerCount = netState.fieldValue.increment(1);
-        } else {
-          const currentCount = typeof roomData.playerCount === 'number' ? roomData.playerCount : playersSnapshot.size;
-          updates.playerCount = currentCount + 1;
+    }
+
+    transaction.set(roomRef, updates, { merge: true });
+  });
+});
+
         }
-      }
-      transaction.update(roomRef, updates);
+        const roomData = roomSnapshot.data() || {};
+        const maxPlayers = typeof roomData.maxPlayers === 'number' ? roomData.maxPlayers : 9;
+        if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
+          throw new Error('This room is already full.');
+        }
+        const now = getTimestampValue();
+        transaction.set(playerDocRef, {
+          uid: currentUser.uid,
+          peerId,
+          name: resolvedName,
+          joinedAt: now,
+          isHost: false,
+        });
+        const updates = {
+          updatedAt: now,
+          lastActivityAt: now,
+        };
+        if (!alreadyPresent) {
+          if (netState.fieldValue && typeof netState.fieldValue.increment === 'function') {
+            updates.playerCount = netState.fieldValue.increment(1);
+          } else {
+            const currentCount = typeof roomData.playerCount === 'number' ? roomData.playerCount : playersSnapshot.size;
+            updates.playerCount = currentCount + 1;
+          }
+        }
+        transaction.update(roomRef, updates);
+      });
     });
 
     try {
@@ -814,33 +972,36 @@ logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`
     return { roomId: trimmedRoomId, peerId, name: resolvedName };
   };
 
-  const deleteCollectionDocs = async (collectionRef, batchSize = 50) => {
-    const firestore = ensureFirestore();
-    let snapshot = await collectionRef.limit(batchSize).get();
-    while (snapshot && !snapshot.empty) {
-      const batch = firestore.batch();
-      snapshot.docs.forEach((doc) => {
-        batch.delete(doc.ref);
-      });
-      await batch.commit();
-      snapshot = await collectionRef.limit(batchSize).get();
-    }
-  };
-
-  const deleteRoomDocument = async (roomRef) => {
-    const subcollections = ['players', 'signals'];
-    for (let i = 0; i < subcollections.length; i += 1) {
-      const sub = subcollections[i];
-      try {
-        const subRef = roomRef.collection(sub);
-        await deleteCollectionDocs(subRef);
-      } catch (error) {
-        logMessage('[ROOM]', `failed to delete ${sub} for code=${roomRef.id}`, error);
+  const deleteCollectionDocs = async (collectionRef, batchSize = 50) =>
+    withFirestoreErrorHandling('update', async () => {
+      const firestore = ensureFirestore();
+      let snapshot = await collectionRef.limit(batchSize).get();
+      while (snapshot && !snapshot.empty) {
+        const batch = firestore.batch();
+        snapshot.docs.forEach((doc) => {
+          batch.delete(doc.ref);
+        });
+        await batch.commit();
+        snapshot = await collectionRef.limit(batchSize).get();
       }
-    }
-    await roomRef.delete();
-    logMessage('[ROOM]', `deleted code=${roomRef.id}`);
-  };
+    });
+
+  const deleteRoomDocument = async (roomRef) =>
+    withFirestoreErrorHandling('update', async () => {
+      const subcollections = ['players', 'signals'];
+      for (let i = 0; i < subcollections.length; i += 1) {
+        const sub = subcollections[i];
+        try {
+          const subRef = roomRef.collection(sub);
+          await deleteCollectionDocs(subRef);
+        } catch (error) {
+          handleFirestoreError('update', error);
+          logMessage('[ROOM]', `failed to delete ${sub} for code=${roomRef.id}`, error);
+        }
+      }
+      await roomRef.delete();
+      logMessage('[ROOM]', `deleted code=${roomRef.id}`);
+    });
 
   const adminCreateRoom = async () => {
     logConfigScope('admin-create-room');
@@ -868,35 +1029,55 @@ logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`
       throw new Error('Room code is required.');
     }
     await ensureAdminPrivileges();
-    let guardResult = null;
-    if (!bootFlags.safe) {
-      guardResult = await ensureAppAndUser();
-      logAppAndUserGuard(guardResult);
+// Ensure app+auth first (unless in safe mode)
+if (!bootFlags.safe && typeof ensureAppAndUser === 'function') {
+  try {
+    const guardResult = await ensureAppAndUser();
+    if (typeof logAppAndUserGuard === 'function') {
+      try { logAppAndUserGuard(guardResult); } catch (_) {}
     }
-    const firestore = ensureFirestore();
-    const roomRef = firestore.collection('rooms').doc(trimmed);
-    const snapshot = await roomRef.get();
-    if (!snapshot.exists) {
-      throw new Error('Room not found.');
-    }
-    await deleteRoomDocument(roomRef);
-    return trimmed;
+  } catch (_) {
+    // If guard fails, withFirestoreErrorHandling below will still surface errors
+  }
+}
+
+return withFirestoreErrorHandling('update', async () => {
+  const firestore = ensureFirestore();
+  const roomRef = firestore.collection('rooms').doc(trimmed);
+  const snapshot = await roomRef.get();
+  if (!snapshot.exists) {
+    throw new Error('Room not found.');
+  }
+  await deleteRoomDocument(roomRef);
+  return trimmed;
+});
+
   };
 
   const adminDeleteAllRooms = async () => {
     await ensureAdminPrivileges();
-    let guardResult = null;
-    if (!bootFlags.safe) {
-      guardResult = await ensureAppAndUser();
-      logAppAndUserGuard(guardResult);
+// Ensure app+auth first (unless in safe mode)
+if (!bootFlags.safe && typeof ensureAppAndUser === 'function') {
+  try {
+    const guardResult = await ensureAppAndUser();
+    if (typeof logAppAndUserGuard === 'function') {
+      try { logAppAndUserGuard(guardResult); } catch (_) {}
     }
-    const firestore = ensureFirestore();
-    const roomsSnapshot = await firestore.collection('rooms').get();
-    const docs = roomsSnapshot.docs || [];
-    for (let i = 0; i < docs.length; i += 1) {
-      await deleteRoomDocument(docs[i].ref);
-    }
-    return docs.length;
+  } catch (_) {
+    // Guard errors will be surfaced by the withFirestoreErrorHandling path below
+  }
+}
+
+return withFirestoreErrorHandling('update', async () => {
+  const firestore = ensureFirestore();
+  const roomsSnapshot = await firestore.collection('rooms').get();
+  const docs = roomsSnapshot.docs || [];
+  for (const doc of docs) {
+    await deleteRoomDocument(doc.ref);
+  }
+  return docs.length;
+});
+
   };
 
   const roomsSectionMarkup = (includeAdminButton = true) => `
@@ -967,6 +1148,7 @@ logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`
             const playersSnapshot = await doc.ref.collection('players').get();
             playerCount = playersSnapshot.size;
           } catch (error) {
+            handleFirestoreError('listen', error);
             playerCount = 0;
           }
         }
@@ -1008,33 +1190,40 @@ logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`
       logMessage('[LOBBY]', 'failed to initialize auth for lobby rooms', error);
       return;
     }
-    const firestore = ensureFirestore();
     try {
-      const query = firestore
-        .collection('rooms')
-        .where('status', '==', 'open')
-        .where('active', '==', true);
-      logMessage('[LOBBY]', 'attach-listener');
-      let firstSnapshotLogged = false;
-      lobbyRoomsState.unsubscribe = query.onSnapshot(
-        (snapshot) => {
-          Promise.resolve()
-            .then(() => refreshRoomsFromSnapshot(snapshot))
-            .then((count) => {
-              if (!firstSnapshotLogged) {
-                const resolvedCount = typeof count === 'number' ? count : lobbyRoomsState.rooms.length;
-                logMessage('[LOBBY]', `rooms=${resolvedCount} first-snapshot`);
-                firstSnapshotLogged = true;
-              }
-            })
-            .catch((error) => {
-              logMessage('[LOBBY]', 'failed to process rooms snapshot', error);
-            });
-        },
-        (error) => {
-          logMessage('[LOBBY]', 'rooms snapshot error', error);
-        }
-      );
+await withFirestoreErrorHandling('listen', async () => {
+  const firestore = ensureFirestore();
+  const query = firestore
+    .collection('rooms')
+    .where('status', '==', 'open')
+    .where('active', '==', true);
+
+  logMessage('[LOBBY]', 'attach-listener');
+  let firstSnapshotLogged = false;
+
+  lobbyRoomsState.unsubscribe = query.onSnapshot(
+    (snapshot) => {
+      Promise.resolve()
+        .then(() => refreshRoomsFromSnapshot(snapshot))
+        .then((count) => {
+          if (!firstSnapshotLogged) {
+            const resolvedCount =
+              typeof count === 'number' ? count : lobbyRoomsState.rooms.length;
+            logMessage('[LOBBY]', `rooms=${resolvedCount} first-snapshot`);
+            firstSnapshotLogged = true;
+          }
+        })
+        .catch((error) => {
+          logMessage('[LOBBY]', 'failed to process rooms snapshot', error);
+        });
+    },
+    (error) => {
+      handleFirestoreError('listen', error);
+      logMessage('[LOBBY]', 'rooms snapshot error', error);
+    }
+  );
+});
+
     } catch (error) {
       logMessage('[LOBBY]', 'unable to listen for rooms', error);
     }
@@ -1241,6 +1430,20 @@ logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`
         box-shadow: 0 28px 60px rgba(2, 6, 14, 0.6);
         padding: 28px 32px;
       }
+      .stickfight-error-banner {
+        margin-bottom: 20px;
+        padding: 14px 18px;
+        border-radius: 12px;
+        background: linear-gradient(135deg, rgba(176, 12, 32, 0.92), rgba(120, 4, 20, 0.92));
+        border: 1px solid rgba(255, 115, 140, 0.75);
+        box-shadow: 0 18px 32px rgba(96, 3, 16, 0.5);
+        color: #ffeef0;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      .stickfight-error-banner[hidden] {
+        display: none;
+      }
       .stickfight-lobby-panel h2 {
         margin: 0 0 12px;
         font-size: 1.6rem;
@@ -1441,6 +1644,7 @@ logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`
     if (!opts.force) {
       overlayState.contentLocked = false;
     }
+    applyBannerMessage();
   };
 
   function renderKeyVerificationError(message) {
