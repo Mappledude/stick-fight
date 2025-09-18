@@ -60,10 +60,7 @@
     overlayInitRequested: false,
     bannerMessage: null,
     activeView: 'lobby',
-    joinPrefillCode: '',
-    pendingJoinRoomId: '',
     routeHandlerAttached: false,
-    invalidRoomLink: false,
     adminAddCode: '',
     selectedStructure: '',
   };
@@ -1442,7 +1439,7 @@ return withFirestoreErrorHandling('update', async () => {
           <div class="stickfight-identity-card__label">Player Identity</div>
           <div class="stickfight-identity-card__body">
             <p>${escapeHtml(missingMessage)}</p>
-            <a class="stickfight-inline-link" href="#/enter">Enter code</a>
+            <a class="stickfight-inline-link" href="#" data-stickfight-enter-code="true">Enter code</a>
           </div>
         </div>
       `;
@@ -1462,22 +1459,75 @@ return withFirestoreErrorHandling('update', async () => {
     `;
   };
 
-  const roomsSectionMarkup = (includeAdminButton = true) => `
+  const roomsSectionMarkup = () => `
       <div class="stickfight-rooms-section">
         <div class="stickfight-rooms-header">
-          <h3>Open Lobbies</h3>
-          <div class="stickfight-rooms-actions">
-            <a class="stickfight-secondary-button stickfight-join-link" href="#/join" id="stickfight-open-join">Join Table</a>
-            ${
-              includeAdminButton
-                ? '<button type="button" class="stickfight-secondary-button" id="stickfight-admin-entry">Admin</button>'
-                : ''
-            }
-          </div>
+<h3>Open Rooms</h3>
+
         </div>
+        <div class="stickfight-lobby-error" id="stickfight-rooms-error"></div>
         <div id="stickfight-rooms-table"></div>
       </div>
     `;
+
+  const ensureLobbyView = () => {
+    showOverlay();
+    overlayState.contentLocked = false;
+    const needsRender =
+      overlayState.activeView !== 'lobby' || !overlayState.panel || !overlayState.panel.innerHTML;
+    if (needsRender) {
+      renderCreateLobby();
+    }
+  };
+
+  let joinRequestInProgress = false;
+
+  const joinLobbyByCode = async (roomCode, options = {}) => {
+    const identity = getPlayerIdentity();
+    const sanitized = sanitizeRoomId(typeof roomCode === 'string' ? roomCode : '');
+    const invalidMessage =
+      options && typeof options.invalidMessage === 'string'
+        ? options.invalidMessage
+        : 'Enter a valid room code.';
+
+    ensureLobbyView();
+
+    if (!identity) {
+      setBannerMessage('Enter your player code before joining a lobby.');
+      return;
+    }
+
+    if (!sanitized) {
+      setBannerMessage(invalidMessage);
+      return;
+    }
+
+    if (joinRequestInProgress) {
+      return;
+    }
+
+    joinRequestInProgress = true;
+    logMessage('[ROOM]', `join attempt code=${sanitized}`);
+    setBannerMessage(`Joining lobby ${sanitized}...`);
+
+    try {
+      const result = await joinRoom(sanitized, {
+        name: identity.name,
+        color: identity.color,
+        codeWord: identity.codeWord,
+      });
+      setBannerMessage('');
+      if (!redirectToRoomIfPossible(result && result.roomId, false)) {
+        hideOverlay();
+        emitEvent('lobbyDismissed', { roomId: netState.roomId, isHost: false });
+      }
+    } catch (error) {
+      const message = error && error.message ? error.message : 'Unable to join the room.';
+      setBannerMessage(message);
+    } finally {
+      joinRequestInProgress = false;
+    }
+  };
 
   const renderRoomsTableMarkup = () => {
     if (!lobbyRoomsState.rooms || lobbyRoomsState.rooms.length === 0) {
@@ -1488,15 +1538,28 @@ return withFirestoreErrorHandling('update', async () => {
       .sort((a, b) => a.code.localeCompare(b.code))
       .map((room) => {
         const maxPlayers = typeof room.maxPlayers === 'number' && room.maxPlayers > 0 ? room.maxPlayers : null;
-        const countText = maxPlayers ? `${room.playerCount}/${maxPlayers}` : `${room.playerCount}`;
+        const playerCount = typeof room.playerCount === 'number' && room.playerCount >= 0 ? room.playerCount : 0;
+        const countText = maxPlayers ? `${playerCount}/${maxPlayers}` : `${playerCount}`;
         const code = escapeHtml(room.code);
+        const roomLabelSource = room && typeof room.roomName === 'string' && room.roomName.trim()
+          ? room.roomName.trim()
+          : room.code;
+        const roomLabel = escapeHtml(roomLabelSource);
+        const sanitizedNames = Array.isArray(room.playerNames)
+          ? room.playerNames
+              .map((name) => (typeof name === 'string' ? name.trim() : ''))
+              .filter((name) => !!name)
+              .map((name) => escapeHtml(name))
+          : [];
+        const namesText = sanitizedNames.length > 0 ? sanitizedNames.join(', ') : escapeHtml('No players');
         return `
           <tr>
-            <td>${code}</td>
+            <td>${roomLabel}</td>
             <td>${escapeHtml(String(countText))}</td>
             <td class="stickfight-join-cell">
               <button type="button" class="stickfight-secondary-button stickfight-room-join" data-room-code="${code}">Join</button>
             </td>
+            <td>${namesText}</td>
           </tr>
         `;
       })
@@ -1505,9 +1568,10 @@ return withFirestoreErrorHandling('update', async () => {
       <table class="stickfight-rooms-table">
         <thead>
           <tr>
-            <th>Code</th>
+            <th>Room</th>
             <th>Players</th>
             <th>Join</th>
+            <th>Names</th>
           </tr>
         </thead>
         <tbody>
@@ -1526,65 +1590,160 @@ return withFirestoreErrorHandling('update', async () => {
       return;
     }
     container.innerHTML = renderRoomsTableMarkup();
+    const errorEl = overlayState.panel.querySelector('#stickfight-rooms-error');
+    if (errorEl) {
+      errorEl.textContent = '';
+    }
     const joinButtons = container.querySelectorAll('.stickfight-room-join');
+    let joinBusy = false;
     joinButtons.forEach((button) => {
-      button.addEventListener('click', () => {
+      button.addEventListener('click', async () => {
+        if (joinBusy) {
+          return;
+        }
+        const identity = getPlayerIdentity();
+        if (!identity) {
+          if (errorEl) {
+            errorEl.textContent = 'Enter your player code before joining a lobby.';
+          }
+          return;
+        }
+        if (errorEl) {
+          errorEl.textContent = '';
+        }
         const raw = button.getAttribute('data-room-code') || '';
         const sanitized = sanitizeRoomId(raw) || (raw ? raw.trim().toUpperCase() : '');
-        overlayState.joinPrefillCode = sanitized;
-        overlayState.pendingJoinRoomId = '';
-        overlayState.invalidRoomLink = false;
-        goToRoute('#/join');
+if (!sanitized) {
+  if (errorEl) {
+    errorEl.textContent = 'Unable to join the selected room.';
+  }
+  return;
+}
+joinBusy = true;
+button.disabled = true;
+try {
+  const result = await joinRoom(sanitized, {
+    name: identity.name,
+    color: identity.color,
+    codeWord: identity.codeWord,
+  });
+  const roomId = (result && result.roomId) || sanitized;
+  if (!redirectToRoomIfPossible(roomId, false)) {
+    renderJoinSuccess(result);
+  }
+} catch (error) {
+  const message = error && error.message ? error.message : 'Unable to join the room.';
+  if (errorEl) {
+    errorEl.textContent = message;
+  }
+} finally {
+  joinBusy = false;
+  button.disabled = false;
+}
+
       });
     });
   };
 
-  const updateRoomsFromMetadata = () => {
-    const metadata = lobbyRoomsState.roomMetadata || {};
-    lobbyRoomsState.rooms = Object.keys(metadata).map((code) => {
-      const entry = metadata[code] || {};
-      const maxPlayers =
-        typeof entry.maxPlayers === 'number' && entry.maxPlayers > 0 ? entry.maxPlayers : undefined;
-      const playerNames = Array.isArray(entry.playerNames) ? entry.playerNames.slice() : [];
-      const playerCount = typeof entry.playerCount === 'number' ? entry.playerCount : 0;
-      return {
-        code,
-        roomName: typeof entry.roomName === 'string' ? entry.roomName : '',
-        playerCount,
-        maxPlayers,
-        playerNames,
-      };
-    });
-    updateRoomsTable();
-  };
+const updateRoomsFromMetadata = () => {
+  const metadata = lobbyRoomsState.roomMetadata || {};
+  lobbyRoomsState.rooms = Object.keys(metadata).map((code) => {
+    const entry = metadata[code] || {};
+    const maxPlayers =
+      typeof entry.maxPlayers === 'number' && entry.maxPlayers > 0 ? entry.maxPlayers : undefined;
+    const playerNames = Array.isArray(entry.playerNames) ? entry.playerNames.slice() : [];
+    const playerCount =
+      typeof entry.playerCount === 'number' && entry.playerCount >= 0
+        ? entry.playerCount
+        : playerNames.length;
+    return {
+      code,
+      roomName: typeof entry.roomName === 'string' ? entry.roomName : '',
+      playerCount,
+      maxPlayers,
+      playerNames,
+    };
+  });
+  updateRoomsTable();
+};
 
-  const detachPlayerListener = (roomId) => {
-    if (!roomId) {
-      return;
-    }
-    const listeners = lobbyRoomsState.playerListeners || {};
-    const unsubscribe = listeners[roomId];
-    if (typeof unsubscribe === 'function') {
-      try {
-        unsubscribe();
-      } catch (error) {
-        handleFirestoreError('listen', error);
-      }
-    }
-    delete listeners[roomId];
-  };
-
-  const attachPlayerListener = (docRef, roomId) => {
-    if (!docRef || !roomId || lobbyRoomsState.playerListeners[roomId]) {
-      return;
-    }
+const detachPlayerListener = (roomId) => {
+  if (!roomId) return;
+  lobbyRoomsState.playerListeners = lobbyRoomsState.playerListeners || {};
+  const unsubscribe = lobbyRoomsState.playerListeners[roomId];
+  if (typeof unsubscribe === 'function') {
     try {
-      const unsubscribe = docRef.collection('players').onSnapshot(
-        (playersSnapshot) => {
-          const metadata = lobbyRoomsState.roomMetadata || {};
-          const entry = metadata[roomId];
-          if (!entry) {
-            return;
+      unsubscribe();
+    } catch (error) {
+      handleFirestoreError('listen', error);
+    }
+  }
+  delete lobbyRoomsState.playerListeners[roomId];
+};
+
+const attachPlayerListener = (docRef, roomId) => {
+  if (!docRef || !roomId) return;
+  lobbyRoomsState.playerListeners = lobbyRoomsState.playerListeners || {};
+  if (lobbyRoomsState.playerListeners[roomId]) return;
+
+  try {
+    const unsubscribe = docRef.collection('players').onSnapshot(
+      (playersSnapshot) => {
+        const metadata = lobbyRoomsState.roomMetadata || (lobbyRoomsState.roomMetadata = {});
+        const entry = metadata[roomId] || (metadata[roomId] = {});
+        const names = [];
+        playersSnapshot.forEach((playerDoc) => {
+          const d = (playerDoc && playerDoc.data) ? playerDoc.data() || {} : {};
+          const nick = typeof d.nick === 'string' ? d.nick.trim() : '';
+          const name = typeof d.name === 'string' ? d.name.trim() : '';
+          const label = nick || name;
+          if (label) names.push(label);
+        });
+        entry.playerNames = names;
+        entry.playerCount = playersSnapshot.size;
+        lobbyRoomsState.roomMetadata = metadata;
+        updateRoomsFromMetadata();
+      },
+      (error) => handleFirestoreError('listen', error)
+    );
+    lobbyRoomsState.playerListeners[roomId] = unsubscribe;
+  } catch (error) {
+    handleFirestoreError('listen', error);
+  }
+};
+
+const refreshRoomsFromSnapshot = (snapshot) => {
+  const docs = snapshot && snapshot.docs ? snapshot.docs : [];
+  const metadata = {};
+
+  docs.forEach((doc) => {
+    const data = doc.data ? doc.data() || {} : {};
+    const roomId = doc.id;
+    metadata[roomId] = {
+      roomName: typeof data.roomName === 'string' ? data.roomName.trim() : '',
+      maxPlayers:
+        typeof data.maxPlayers === 'number' && data.maxPlayers > 0 ? data.maxPlayers : undefined,
+      // May be overridden by player listener; keep initial value if provided:
+      playerCount:
+        typeof data.playerCount === 'number' && data.playerCount >= 0 ? data.playerCount : undefined,
+      playerNames: [],
+    };
+    // Ensure we have a live listener for players in this room
+    attachPlayerListener(doc.ref, roomId);
+  });
+
+  // Detach listeners for rooms that no longer exist
+  lobbyRoomsState.playerListeners = lobbyRoomsState.playerListeners || {};
+  Object.keys(lobbyRoomsState.playerListeners).forEach((roomId) => {
+    if (!metadata[roomId]) {
+      detachPlayerListener(roomId);
+    }
+  });
+
+  lobbyRoomsState.roomMetadata = metadata;
+  updateRoomsFromMetadata();
+};
+
           }
           const names = [];
           playersSnapshot.forEach((playerDoc) => {
@@ -1629,15 +1788,14 @@ return withFirestoreErrorHandling('update', async () => {
       } else if (typeof entry.playerCount !== 'number') {
         entry.playerCount = 0;
       }
-      entry.maxPlayers = typeof data.maxPlayers === 'number' ? data.maxPlayers : entry.maxPlayers;
+      entry.maxPlayers =
+        typeof data.maxPlayers === 'number' ? data.maxPlayers : entry.maxPlayers;
       metadata[code] = entry;
       attachPlayerListener(doc.ref, code);
     });
 
     Object.keys(metadata).forEach((code) => {
-      if (activeRoomIds.has(code)) {
-        return;
-      }
+      if (activeRoomIds.has(code)) return;
       detachPlayerListener(code);
       delete metadata[code];
     });
@@ -1666,6 +1824,7 @@ return withFirestoreErrorHandling('update', async () => {
     }
     lobbyRoomsState.unsubscribe = null;
     lobbyRoomsState.listening = false;
+
     updateRoomsTable();
   };
 
@@ -1747,13 +1906,11 @@ await withFirestoreErrorHandling('listen', async () => {
         handleAdminEntry();
       });
     }
-    const joinLink = overlayState.panel.querySelector('#stickfight-open-join');
-    if (joinLink) {
-      joinLink.addEventListener('click', (event) => {
+    const identityLink = overlayState.panel.querySelector('[data-stickfight-enter-code]');
+    if (identityLink) {
+      identityLink.addEventListener('click', (event) => {
         event.preventDefault();
-        overlayState.pendingJoinRoomId = '';
-        overlayState.invalidRoomLink = false;
-        goToRoute('#/join');
+        renderEnterView();
       });
     }
   };
@@ -1799,7 +1956,7 @@ await withFirestoreErrorHandling('listen', async () => {
           <button type="button" class="stickfight-secondary-button" id="stickfight-admin-back">Back</button>
         </div>
       </div>
-      ${roomsSectionMarkup(false)}
+      ${roomsSectionMarkup()}
     `
     );
 
@@ -2450,36 +2607,34 @@ await withFirestoreErrorHandling('listen', async () => {
   };
 
   const renderLayout = (activeView, bodyHtml) => {
+    const normalizedView = activeView === 'admin' ? 'admin' : 'lobby';
     const navLink = (view, id, label) => {
-      const isActive = activeView === view ? ' active' : '';
+      const isActive = normalizedView === view ? ' active' : '';
       return `<a href="#/${view}" id="${id}" class="nav-link${isActive}">${label}</a>`;
     };
     const viewSection = (view) => {
-      const hiddenClass = activeView === view ? '' : ' class="hidden"';
-      const content = activeView === view ? bodyHtml : '';
+      const hiddenClass = normalizedView === view ? '' : ' class="hidden"';
+      const content = normalizedView === view ? bodyHtml : '';
       return `<section data-view="${view}"${hiddenClass}>${content}</section>`;
     };
     return `
       <header class="topbar">
         <nav class="nav">
           ${navLink('lobby', 'link-lobby', 'Lobby')}
-          ${navLink('enter', 'link-enter', 'Enter Code')}
           ${navLink('admin', 'link-admin', 'Admin')}
-          ${navLink('join', 'link-join', 'Join Table')}
         </nav>
       </header>
       <main class="stickfight-main">
         ${viewSection('lobby')}
-        ${viewSection('enter')}
         ${viewSection('admin')}
-        ${viewSection('join')}
       </main>
     `;
   };
 
   const renderView = (activeView, bodyHtml, options) => {
-    overlayState.activeView = activeView;
-    renderContent(renderLayout(activeView, bodyHtml), options);
+    const normalizedView = activeView === 'admin' ? 'admin' : 'lobby';
+    overlayState.activeView = normalizedView;
+    renderContent(renderLayout(normalizedView, bodyHtml), options);
   };
 
   function renderKeyVerificationError(message) {
@@ -2522,124 +2677,13 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     showOverlay();
     overlayState.contentLocked = false;
-    const identity = getPlayerIdentity();
     const identityMarkup = playerIdentityMarkup({
-      missingMessage: 'Enter your player code before hosting or joining games.',
+      missingMessage: 'Enter your player code before joining a lobby.',
     });
-    const structureOptions = resolveRoomStructureOptions();
-    const selectedStructure = overlayState.selectedStructure || getDefaultRoomStructure();
-    const structureOptionsMarkup = structureOptions
-      .map((option) => {
-        if (!option || !option.value) {
-          return '';
-        }
-        const value = escapeHtml(option.value);
-        const label = escapeHtml(option.label || option.value);
-        const selected = option.value === selectedStructure ? ' selected' : '';
-        return `<option value="${value}"${selected}>${label}</option>`;
-      })
-      .join('');
     renderView('lobby', `
       ${identityMarkup}
-      <h2>Host a Lobby</h2>
-      <p>${escapeHtml(
-        identity
-          ? 'Create a room and share the invite link with your friends.'
-          : 'Enter your assigned code word to unlock hosting.'
-      )}</p>
-      <form class="stickfight-lobby-form" id="stickfight-create-form">
-        <label>
-          <span>Room Name</span>
-          <input type="text" id="stickfight-room-name" name="roomName" maxlength="64" autocomplete="off" placeholder="Room name" required${
-            identity ? '' : ' disabled'
-          } />
-        </label>
-        <label>
-          <span>Structure</span>
-          <select id="stickfight-room-structure" name="structure"${identity ? '' : ' disabled'}>${structureOptionsMarkup}</select>
-        </label>
-        <div class="stickfight-lobby-error" id="stickfight-create-error"></div>
-        <button type="submit" class="stickfight-primary-button" id="stickfight-create-button"${
-          identity ? '' : ' disabled'
-        }>Create Game</button>
-      </form>
       ${roomsSectionMarkup()}
     `);
-
-    const form = overlayState.panel.querySelector('#stickfight-create-form');
-    const roomNameInput = overlayState.panel.querySelector('#stickfight-room-name');
-    const structureSelect = overlayState.panel.querySelector('#stickfight-room-structure');
-    const errorEl = overlayState.panel.querySelector('#stickfight-create-error');
-    const submitButton = overlayState.panel.querySelector('#stickfight-create-button');
-
-    if (roomNameInput && identity) {
-      roomNameInput.focus();
-    }
-
-    if (structureSelect && selectedStructure) {
-      structureSelect.value = selectedStructure;
-    }
-
-    if (structureSelect) {
-      structureSelect.addEventListener('change', () => {
-        overlayState.selectedStructure = structureSelect.value || '';
-      });
-    }
-
-    let busy = false;
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      if (!roomNameInput || !structureSelect || !submitButton) {
-        return;
-      }
-      const activeIdentity = getPlayerIdentity();
-      if (!activeIdentity) {
-        if (errorEl) {
-          errorEl.textContent = 'Enter your player code before hosting a lobby.';
-        }
-        return;
-      }
-      if (busy) {
-        return;
-      }
-      busy = true;
-      logMessage('[ROOM]', 'create click');
-      if (errorEl) {
-        errorEl.textContent = '';
-      }
-      submitButton.disabled = true;
-      const roomName = roomNameInput ? roomNameInput.value.trim() : '';
-      const structureValue = structureSelect ? structureSelect.value : '';
-      if (!roomName) {
-        if (errorEl) {
-          errorEl.textContent = 'Room name is required.';
-        }
-        submitButton.disabled = false;
-        busy = false;
-        if (roomNameInput) {
-          roomNameInput.focus();
-        }
-        return;
-      }
-      try {
-        const result = await createRoom({
-          name: activeIdentity.name,
-          color: activeIdentity.color,
-          codeWord: activeIdentity.codeWord,
-          roomName,
-          structure: structureValue,
-        });
-        overlayState.selectedStructure = structureValue;
-        renderHostShare(result);
-      } catch (error) {
-        const message = error && error.message ? error.message : 'Unable to create the room.';
-        if (errorEl) {
-          errorEl.textContent = message;
-        }
-        submitButton.disabled = false;
-        busy = false;
-      }
-    });
 
     attachAdminEntryHandler();
     updateRoomsTable();
@@ -2758,220 +2802,6 @@ await withFirestoreErrorHandling('listen', async () => {
     updateRoomsTable();
   };
 
-  const renderJoinForm = (roomId) => {
-    if (overlayState.fatalError) {
-      showOverlay();
-      return;
-    }
-    showOverlay();
-    overlayState.contentLocked = false;
-    const sanitizedRoomId = sanitizeRoomId(roomId);
-    const displayRoomId = sanitizedRoomId || (roomId ? roomId.trim().toUpperCase() : '');
-    overlayState.joinPrefillCode = displayRoomId;
-    const identity = getPlayerIdentity();
-    const identityMarkup = playerIdentityMarkup({
-      missingMessage: 'Enter your player code before joining a lobby.',
-    });
-    renderView('join', `
-      ${identityMarkup}
-      <h2>Join Lobby</h2>
-      <p>${escapeHtml(
-        identity
-          ? 'Confirm your details and join the selected lobby.'
-          : 'Enter your player code before joining a lobby.'
-      )}</p>
-      <form class="stickfight-lobby-form" id="stickfight-join-form">
-        <label>
-          <span>Room Code</span>
-          <input type="text" id="stickfight-join-room-code" name="code" maxlength="12" autocomplete="off" value="${escapeHtml(
-            displayRoomId
-          )}"${identity ? '' : ' disabled'} />
-        </label>
-        <div class="stickfight-lobby-error" id="stickfight-join-error"></div>
-        <button type="submit" class="stickfight-primary-button" id="stickfight-join-button"${
-          identity ? '' : ' disabled'
-        }>Join Lobby</button>
-      </form>
-      ${roomsSectionMarkup()}
-    `);
-
-    const form = overlayState.panel.querySelector('#stickfight-join-form');
-    const codeInput = overlayState.panel.querySelector('#stickfight-join-room-code');
-    const errorEl = overlayState.panel.querySelector('#stickfight-join-error');
-    const submitButton = overlayState.panel.querySelector('#stickfight-join-button');
-
-    if (!form) {
-      attachAdminEntryHandler();
-      updateRoomsTable();
-      return;
-    }
-
-    if (codeInput && identity) {
-      codeInput.focus();
-    }
-
-    if (codeInput) {
-      codeInput.addEventListener('input', () => {
-        const nextValue = codeInput.value ? codeInput.value.toUpperCase() : '';
-        const sanitized = nextValue.replace(/[^A-Z0-9_-]/g, '');
-        if (sanitized !== codeInput.value) {
-          codeInput.value = sanitized;
-        }
-      });
-    }
-
-    let busy = false;
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      if (!codeInput || !submitButton) {
-        return;
-      }
-      const activeIdentity = getPlayerIdentity();
-      if (!activeIdentity) {
-        if (errorEl) {
-          errorEl.textContent = 'Enter your player code before joining a lobby.';
-        }
-        return;
-      }
-      if (busy) {
-        return;
-      }
-      busy = true;
-      const roomCodeRaw = codeInput.value ? codeInput.value.trim().toUpperCase() : '';
-      const targetCode = sanitizeRoomId(roomCodeRaw);
-      logMessage('[ROOM]', `join click code=${targetCode || roomCodeRaw}`);
-      if (errorEl) {
-        errorEl.textContent = '';
-      }
-      submitButton.disabled = true;
-      if (!targetCode) {
-        if (errorEl) {
-          errorEl.textContent = 'Enter a valid room code.';
-        }
-        submitButton.disabled = false;
-        busy = false;
-        codeInput.focus();
-        return;
-      }
-      overlayState.joinPrefillCode = targetCode;
-      try {
-        const result = await joinRoom(targetCode, {
-          name: activeIdentity.name,
-          color: activeIdentity.color,
-          codeWord: activeIdentity.codeWord,
-        });
-        renderJoinSuccess(result);
-      } catch (error) {
-        const message = error && error.message ? error.message : 'Unable to join the room.';
-        if (errorEl) {
-          errorEl.textContent = message;
-        }
-        submitButton.disabled = false;
-        busy = false;
-      }
-    });
-
-    attachAdminEntryHandler();
-    updateRoomsTable();
-  };
-
-  const renderJoinTableView = () => {
-    if (overlayState.fatalError) {
-      showOverlay();
-      return;
-    }
-    showOverlay();
-    overlayState.contentLocked = false;
-    overlayState.invalidRoomLink = false;
-    const identity = getPlayerIdentity();
-    const identityMarkup = playerIdentityMarkup({
-      missingMessage: 'Enter your player code before joining a lobby.',
-    });
-    renderView(
-      'join',
-      `
-      ${identityMarkup}
-      <h2>Join Table</h2>
-      <p>${escapeHtml(
-        identity
-          ? 'Enter a room code to join an existing lobby.'
-          : 'Enter your player code before joining a lobby. Once ready, enter a room code to join an existing lobby.'
-      )}</p>
-      <form class="stickfight-lobby-form" id="join-form">
-        <label>
-          <span>Room Code</span>
-          <input type="text" id="join-code" name="code" placeholder="Enter room code" autocomplete="off" required${
-            identity ? '' : ' disabled'
-          } />
-        </label>
-        <div class="stickfight-lobby-error" id="stickfight-join-code-error"></div>
-        <button type="submit" class="stickfight-primary-button"${identity ? '' : ' disabled'}>Join</button>
-      </form>
-      ${roomsSectionMarkup()}
-    `
-    );
-
-    const form = overlayState.panel.querySelector('#join-form');
-    const input = overlayState.panel.querySelector('#join-code');
-    const errorEl = overlayState.panel.querySelector('#stickfight-join-code-error');
-
-    if (input) {
-      input.addEventListener('input', () => {
-        const next = input.value ? input.value.toUpperCase() : '';
-        const sanitized = next.replace(/[^A-Z0-9_-]/g, '');
-        if (sanitized !== input.value) {
-          input.value = sanitized;
-        }
-      });
-    }
-
-    if (input && overlayState.joinPrefillCode) {
-      input.value = overlayState.joinPrefillCode;
-      if (identity) {
-        input.focus();
-      }
-    } else if (input && identity) {
-      input.focus();
-    }
-
-    if (!form) {
-      attachAdminEntryHandler();
-      updateRoomsTable();
-      return;
-    }
-
-    form.addEventListener('submit', (event) => {
-      event.preventDefault();
-      if (!input) {
-        return;
-      }
-      const activeIdentity = getPlayerIdentity();
-      if (!activeIdentity) {
-        if (errorEl) {
-          errorEl.textContent = 'Enter your player code before joining a lobby.';
-        }
-        return;
-      }
-      const rawCode = input.value ? input.value.trim().toUpperCase() : '';
-      const sanitized = sanitizeRoomId(rawCode);
-      if (!sanitized) {
-        if (errorEl) {
-          errorEl.textContent = 'Enter a valid room code.';
-        }
-        return;
-      }
-      if (errorEl) {
-        errorEl.textContent = '';
-      }
-      overlayState.joinPrefillCode = sanitized;
-      overlayState.pendingJoinRoomId = sanitized;
-      renderJoinForm(sanitized);
-    });
-
-    attachAdminEntryHandler();
-    updateRoomsTable();
-  };
-
   const renderEnterView = () => {
     if (overlayState.fatalError) {
       showOverlay();
@@ -3070,79 +2900,12 @@ await withFirestoreErrorHandling('listen', async () => {
     });
   };
 
-  const renderJoinSuccess = (result) => {
-    if (overlayState.fatalError) {
-      showOverlay();
-      return;
-    }
-    const roomId = result && result.roomId ? result.roomId : netState.roomId || '';
-    if (redirectToRoomIfPossible(roomId, false)) {
-      return;
-    }
-    const playerName = result && result.name ? result.name : 'Player';
-    overlayState.contentLocked = false;
-    renderView('join', `
-      <h2>Ready to Fight</h2>
-      <p>${escapeHtml(playerName)}, you have joined the lobby. Waiting for the host to start the match!</p>
-      <div style="display: flex; justify-content: flex-end; margin-top: 24px;">
-        <button type="button" class="stickfight-primary-button" id="stickfight-join-success-button">Continue</button>
-      </div>
-    `);
-
-    const button = overlayState.panel.querySelector('#stickfight-join-success-button');
-    if (button) {
-      button.addEventListener('click', () => {
-        if (redirectToRoomIfPossible(roomId, false)) {
-          return;
-        }
-        hideOverlay();
-        emitEvent('lobbyDismissed', { roomId: netState.roomId, isHost: false });
-      });
-    }
-  };
-
-  const renderInvalidRoom = () => {
-    if (overlayState.fatalError) {
-      showOverlay();
-      return;
-    }
-    showOverlay();
-    overlayState.contentLocked = false;
-    renderView('join', `
-      <h2>Invalid Link</h2>
-      <p>The lobby link you followed is missing or invalid. You can create a new game to get started.</p>
-      <div style="display: flex; justify-content: flex-end; margin-top: 24px;">
-        <button type="button" class="stickfight-primary-button" id="stickfight-create-from-invalid">Create New Game</button>
-      </div>
-      ${roomsSectionMarkup()}
-    `);
-
-    const button = overlayState.panel.querySelector('#stickfight-create-from-invalid');
-    if (button) {
-      button.addEventListener('click', () => {
-        renderCreateLobby();
-      });
-    }
-
-    attachAdminEntryHandler();
-    updateRoomsTable();
-  };
-
   const normalizeRouteKey = (value) => {
-    if (value === '#/admin' || value === '#/join' || value === '#/lobby' || value === '#/enter') {
+    if (value === '#/admin' || value === '#/lobby') {
       return value;
     }
     if (value === '#admin') {
       return '#/admin';
-    }
-    if (value === '#join') {
-      return '#/join';
-    }
-    if (value === '#enter') {
-      return '#/enter';
-    }
-    if (value === '#lobby') {
-      return '#/lobby';
     }
     return '#/lobby';
   };
@@ -3159,21 +2922,6 @@ await withFirestoreErrorHandling('listen', async () => {
     switch (routeKey) {
       case '#/admin':
         renderAdminPanel();
-        break;
-      case '#/join':
-        if (overlayState.invalidRoomLink) {
-          overlayState.invalidRoomLink = false;
-          renderInvalidRoom();
-        } else if (overlayState.pendingJoinRoomId) {
-          const code = overlayState.pendingJoinRoomId;
-          overlayState.pendingJoinRoomId = '';
-          renderJoinForm(code);
-        } else {
-          renderJoinTableView();
-        }
-        break;
-      case '#/enter':
-        renderEnterView();
         break;
       case '#/lobby':
       default:
@@ -3244,19 +2992,19 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     const safeRoomId = sanitizeRoomId(roomId);
     let initialRoute = null;
-    if (safeRoomId) {
-      overlayState.pendingJoinRoomId = safeRoomId;
-      overlayState.joinPrefillCode = safeRoomId;
-      initialRoute = '#/join';
-    } else if (roomId) {
-      overlayState.joinPrefillCode = roomId.trim().toUpperCase();
-      overlayState.invalidRoomLink = true;
-      initialRoute = '#/join';
-    }
-    if (!initialRoute && typeof window !== 'undefined' && window.location && window.location.hash) {
+    if (typeof window !== 'undefined' && window.location && window.location.hash) {
       initialRoute = normalizeRouteKey(window.location.hash);
     }
     setupRouter(initialRoute || '#/lobby');
+
+    if (safeRoomId) {
+      joinLobbyByCode(safeRoomId);
+    } else if (roomId) {
+      ensureLobbyView();
+      setBannerMessage(
+        'The lobby link you followed is missing or invalid. You can create a new game to get started.'
+      );
+    }
   };
 
   const initWhenReady = () => {
@@ -3284,6 +3032,7 @@ await withFirestoreErrorHandling('listen', async () => {
     ensureAppAndUser,
     createRoom,
     joinRoom,
+    joinLobbyByCode,
     buildShareUrl,
     hideOverlay,
     showOverlay,
