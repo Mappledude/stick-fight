@@ -288,6 +288,66 @@ function ensureAuthReady() {
   return ensureSignedInUser().then(() => undefined);
 }
 
+  let lastEnsureAppAndUserMeta = null;
+
+  async function ensureAppAndUser() {
+    if (NETWORK_DISABLED) {
+      throw new Error('Networking disabled by query flags.');
+    }
+    if (!FirebaseBootstrap || typeof FirebaseBootstrap.initFirebase !== 'function') {
+      throw new Error('Firebase bootstrap helper unavailable.');
+    }
+    if (typeof FirebaseBootstrap.ensureSignedInUser !== 'function') {
+      throw new Error('Firebase bootstrap helper unavailable.');
+    }
+
+    const firebase = firebaseNamespace();
+    const appsBefore = firebase && firebase.apps ? firebase.apps.length : 0;
+    const app = FirebaseBootstrap.initFirebase();
+    if (!firebaseAppInstance) {
+      firebaseAppInstance = app;
+    }
+    const result = await FirebaseBootstrap.ensureSignedInUser();
+    const auth = result && result.auth ? result.auth : null;
+    const user = result && result.user ? result.user : null;
+    const firebaseAfter = firebaseNamespace();
+    const appsAfter = firebaseAfter && firebaseAfter.apps ? firebaseAfter.apps.length : appsBefore;
+    lastEnsureAppAndUserMeta = {
+      appsBefore,
+      appsAfter,
+    };
+    return { app, auth, user };
+  }
+
+  const logAppAndUserGuard = (guardResult) => {
+    if (!guardResult) {
+      return;
+    }
+    const meta = lastEnsureAppAndUserMeta || {};
+    const firebase = firebaseNamespace();
+    const appsAfter =
+      typeof meta.appsAfter === 'number'
+        ? meta.appsAfter
+        : firebase && firebase.apps
+        ? firebase.apps.length
+        : 0;
+    const reused =
+      typeof meta.appsBefore === 'number'
+        ? meta.appsBefore > 0
+          ? 'yes'
+          : 'no'
+        : appsAfter > 1
+        ? 'yes'
+        : appsAfter > 0
+        ? 'no'
+        : 'unknown';
+    bootLog('INIT', `sdk=compat scriptType=classic appInitRequested=yes reusedApp=${reused} apps=${appsAfter}`);
+    const auth = guardResult.auth || null;
+    const user = guardResult.user || (auth && auth.currentUser) || null;
+    const uid = user && user.uid ? user.uid : 'missing';
+    bootLog('AUTH', `uid=${uid}`);
+  };
+
   const ADMIN_CLAIM_KEYS = ['admin', 'stickfightAdmin'];
 
   const claimsContainAdmin = (claims) => {
@@ -516,8 +576,12 @@ function ensureAuthReady() {
 
   const createRoom = async (options) => {
     logConfigScope('room-create');
-    await ensureAuthReady();
-    const { auth, user } = await ensureSignedInUser();
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      guardResult = await ensureAppAndUser();
+      logAppAndUserGuard(guardResult);
+    }
+    const { auth, user } = guardResult || (await ensureSignedInUser());
     const currentUser = user || (auth && auth.currentUser);
     if (!currentUser || !currentUser.uid) {
       throw new Error('Unable to determine the authenticated user.');
@@ -547,9 +611,13 @@ function ensureAuthReady() {
 
   const joinRoom = async (roomId, options) => {
     logConfigScope('room-join');
-    await ensureAuthReady();
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      guardResult = await ensureAppAndUser();
+      logAppAndUserGuard(guardResult);
+    }
     const firestore = ensureFirestore();
-    const { auth, user } = await ensureSignedInUser();
+    const { auth, user } = guardResult || (await ensureSignedInUser());
     const currentUser = user || (auth && auth.currentUser);
     if (!currentUser || !currentUser.uid) {
       throw new Error('Unable to determine the authenticated user.');
@@ -655,6 +723,11 @@ function ensureAuthReady() {
     if (!user || !user.uid) {
       throw new Error('Admin privileges are required.');
     }
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      guardResult = await ensureAppAndUser();
+      logAppAndUserGuard(guardResult);
+    }
     const record = await createRoomRecord({ hostUid: user.uid, hostName: 'Admin' });
     return {
       roomId: record.roomId,
@@ -669,6 +742,11 @@ function ensureAuthReady() {
       throw new Error('Room code is required.');
     }
     await ensureAdminPrivileges();
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      guardResult = await ensureAppAndUser();
+      logAppAndUserGuard(guardResult);
+    }
     const firestore = ensureFirestore();
     const roomRef = firestore.collection('rooms').doc(trimmed);
     const snapshot = await roomRef.get();
@@ -681,6 +759,11 @@ function ensureAuthReady() {
 
   const adminDeleteAllRooms = async () => {
     await ensureAdminPrivileges();
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      guardResult = await ensureAppAndUser();
+      logAppAndUserGuard(guardResult);
+    }
     const firestore = ensureFirestore();
     const roomsSnapshot = await firestore.collection('rooms').get();
     const docs = roomsSnapshot.docs || [];
@@ -782,6 +865,16 @@ function ensureAuthReady() {
       return;
     }
     lobbyRoomsState.listening = true;
+    let guardResult = null;
+    if (!bootFlags.safe) {
+      try {
+        guardResult = await ensureAppAndUser();
+        logAppAndUserGuard(guardResult);
+      } catch (error) {
+        logMessage('[LOBBY]', 'failed to initialize firebase app/user for lobby rooms', error);
+        return;
+      }
+    }
     try {
       await ensureAuthReady();
     } catch (error) {
@@ -1544,6 +1637,7 @@ function ensureAuthReady() {
     ensureAuth,
     ensureSignedInUser,
     ensureAuthReady,
+    ensureAppAndUser,
     createRoom,
     joinRoom,
     buildShareUrl,
