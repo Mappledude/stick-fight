@@ -379,6 +379,8 @@
 
   const lobbyRoomsState = {
     rooms: [],
+    roomMetadata: {},
+    playerListeners: {},
     unsubscribe: null,
     listening: false,
   };
@@ -1537,36 +1539,134 @@ return withFirestoreErrorHandling('update', async () => {
     });
   };
 
+  const updateRoomsFromMetadata = () => {
+    const metadata = lobbyRoomsState.roomMetadata || {};
+    lobbyRoomsState.rooms = Object.keys(metadata).map((code) => {
+      const entry = metadata[code] || {};
+      const maxPlayers =
+        typeof entry.maxPlayers === 'number' && entry.maxPlayers > 0 ? entry.maxPlayers : undefined;
+      const playerNames = Array.isArray(entry.playerNames) ? entry.playerNames.slice() : [];
+      const playerCount = typeof entry.playerCount === 'number' ? entry.playerCount : 0;
+      return {
+        code,
+        roomName: typeof entry.roomName === 'string' ? entry.roomName : '',
+        playerCount,
+        maxPlayers,
+        playerNames,
+      };
+    });
+    updateRoomsTable();
+  };
+
+  const detachPlayerListener = (roomId) => {
+    if (!roomId) {
+      return;
+    }
+    const listeners = lobbyRoomsState.playerListeners || {};
+    const unsubscribe = listeners[roomId];
+    if (typeof unsubscribe === 'function') {
+      try {
+        unsubscribe();
+      } catch (error) {
+        handleFirestoreError('listen', error);
+      }
+    }
+    delete listeners[roomId];
+  };
+
+  const attachPlayerListener = (docRef, roomId) => {
+    if (!docRef || !roomId || lobbyRoomsState.playerListeners[roomId]) {
+      return;
+    }
+    try {
+      const unsubscribe = docRef.collection('players').onSnapshot(
+        (playersSnapshot) => {
+          const metadata = lobbyRoomsState.roomMetadata || {};
+          const entry = metadata[roomId];
+          if (!entry) {
+            return;
+          }
+          const names = [];
+          playersSnapshot.forEach((playerDoc) => {
+            const playerData = playerDoc && typeof playerDoc.data === 'function' ? playerDoc.data() || {} : {};
+            const rawName = typeof playerData.name === 'string' ? playerData.name : '';
+            const trimmed = rawName.trim();
+            if (trimmed) {
+              names.push(trimmed);
+            }
+          });
+          entry.playerCount = playersSnapshot.size;
+          entry.playerNames = names;
+          updateRoomsFromMetadata();
+        },
+        (error) => {
+          handleFirestoreError('listen', error);
+        }
+      );
+      lobbyRoomsState.playerListeners[roomId] = unsubscribe;
+    } catch (error) {
+      handleFirestoreError('listen', error);
+    }
+  };
+
   const refreshRoomsFromSnapshot = async (snapshot) => {
     const docs = snapshot && snapshot.docs ? snapshot.docs : [];
-    const processed = await Promise.all(
-      docs.map(async (doc) => {
-        const data = doc.data ? doc.data() || {} : {};
-        let playerCount = typeof data.playerCount === 'number' ? data.playerCount : null;
-        let maxPlayers = typeof data.maxPlayers === 'number' ? data.maxPlayers : null;
-        if (playerCount === null) {
-          try {
-            const playersSnapshot = await doc.ref.collection('players').get();
-            playerCount = playersSnapshot.size;
-          } catch (error) {
-            handleFirestoreError('listen', error);
-            playerCount = 0;
-          }
-        }
-        if (maxPlayers === null) {
-          maxPlayers = 0;
-        }
-        return {
-          code: doc.id,
-          playerCount,
-          maxPlayers: maxPlayers || undefined,
-        };
-      })
-    );
-    lobbyRoomsState.rooms = processed;
+    const metadata = lobbyRoomsState.roomMetadata || {};
+    const activeRoomIds = new Set();
+
+    docs.forEach((doc) => {
+      const code = doc && doc.id ? doc.id : '';
+      if (!code) {
+        return;
+      }
+      activeRoomIds.add(code);
+      const data = doc.data ? doc.data() || {} : {};
+      const entry = metadata[code] || { code, playerNames: [] };
+      entry.code = code;
+      entry.roomName = typeof data.roomName === 'string' ? data.roomName : entry.roomName || '';
+      if (typeof data.playerCount === 'number') {
+        entry.playerCount = data.playerCount;
+      } else if (typeof entry.playerCount !== 'number') {
+        entry.playerCount = 0;
+      }
+      entry.maxPlayers = typeof data.maxPlayers === 'number' ? data.maxPlayers : entry.maxPlayers;
+      metadata[code] = entry;
+      attachPlayerListener(doc.ref, code);
+    });
+
+    Object.keys(metadata).forEach((code) => {
+      if (activeRoomIds.has(code)) {
+        return;
+      }
+      detachPlayerListener(code);
+      delete metadata[code];
+    });
+
+    lobbyRoomsState.roomMetadata = metadata;
+    updateRoomsFromMetadata();
+    const count = docs.length;
+    logMessage('[LOBBY]', `rooms=${count}`);
+    return count;
+  };
+
+  const stopLobbyRoomsListener = () => {
+    const listeners = lobbyRoomsState.playerListeners || {};
+    Object.keys(listeners).forEach((roomId) => {
+      detachPlayerListener(roomId);
+    });
+    lobbyRoomsState.playerListeners = {};
+    lobbyRoomsState.roomMetadata = {};
+    lobbyRoomsState.rooms = [];
+    if (typeof lobbyRoomsState.unsubscribe === 'function') {
+      try {
+        lobbyRoomsState.unsubscribe();
+      } catch (error) {
+        handleFirestoreError('listen', error);
+      }
+    }
+    lobbyRoomsState.unsubscribe = null;
+    lobbyRoomsState.listening = false;
     updateRoomsTable();
-    logMessage('[LOBBY]', `rooms=${processed.length}`);
-    return processed.length;
   };
 
   const startLobbyRoomsListener = async () => {
@@ -1945,6 +2045,7 @@ await withFirestoreErrorHandling('listen', async () => {
     if (overlayState.overlay) {
       overlayState.overlay.classList.add('stickfight-hidden');
     }
+    stopLobbyRoomsListener();
   };
 
   const showOverlay = () => {
@@ -3186,6 +3287,7 @@ await withFirestoreErrorHandling('listen', async () => {
     buildShareUrl,
     hideOverlay,
     showOverlay,
+    stopLobbyRoomsListener,
     adminCreateRoom,
     adminDeleteRoomByCode,
     adminDeleteAllRooms,
