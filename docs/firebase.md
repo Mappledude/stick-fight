@@ -12,6 +12,16 @@ firebase deploy --only firestore:rules
 
 This command requires the Firebase CLI to be authenticated against the `stick-fight-pigeon` project.
 
+## Deploy updated Hosting assets
+
+Run the following command to build Cloud Functions and release the latest Hosting build for the `stick-fight-pigeon` site:
+
+```bash
+npm run deploy
+```
+
+This is the canonical command for publishing Hosting updates and ensures only the `stick-fight-pigeon` site is updated.
+
 ## Grant admin access
 
 Administrative actions in the in-game panel require a custom claim named `admin` (or `stickfightAdmin`) on the Firebase Authentication user. You can assign the claim with the Firebase CLI or via an admin SDK script. Example using the CLI:
