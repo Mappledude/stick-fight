@@ -64,10 +64,18 @@
     listening: false,
   };
 
-  const FirebaseBootstrap =
-    global && typeof global.__StickFightFirebaseBootstrap === 'object'
-      ? global.__StickFightFirebaseBootstrap
-      : null;
+  const FirebaseBootstrap = (function resolveFirebaseBootstrap(scope) {
+    if (!scope) {
+      return null;
+    }
+    if (typeof scope.__StickFightFirebaseBootstrap === 'object') {
+      return scope.__StickFightFirebaseBootstrap;
+    }
+    if (typeof scope.FirebaseBootstrap === 'object') {
+      return scope.FirebaseBootstrap;
+    }
+    return null;
+  })(global);
 
   const FirebaseConfigModule =
     global && typeof global.__StickFightFirebaseConfigModule === 'object'
