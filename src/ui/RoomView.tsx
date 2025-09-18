@@ -3,7 +3,7 @@ import MobileControls from './controls/MobileControls';
 import { claimPlayer, ERR_DEVICE_MISMATCH, HeartbeatHandle } from '../net/playerClaim';
 import { setLocalContext, clearLocalContext } from '../net/send';
 import { startConsuming, stopConsuming } from '../net/consume';
-import { getDeviceId } from '../lib/identity';
+import { getDeviceId, ensureAppAndUser } from '../lib/identity';
 import { debugWarn } from '../lib/debug';
 
 type RoomViewProps = {
@@ -25,6 +25,27 @@ export default function RoomView({ roomId, nick, children }: RoomViewProps) {
   const [error, setError] = useState<Error | null>(null);
   const [authError, setAuthError] = useState<{ code?: string; message?: string } | null>(null);
   const [claim, setClaim] = useState<ClaimState | null>(null);
+  const [signedInUid, setSignedInUid] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    ensureAppAndUser()
+      .then(({ user }) => {
+        if (cancelled) {
+          return;
+        }
+        setSignedInUid(user.uid);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        debugWarn('[INPUT][AUTH] ensureAppAndUser failed', error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -140,10 +161,12 @@ export default function RoomView({ roomId, nick, children }: RoomViewProps) {
     );
   }
 
+  const controlsReady = Boolean(claim && signedInUid && claim.uid === signedInUid);
+
   return (
     <div className="room-view ready">
       {children}
-      {claim ? <MobileControls /> : null}
+      {controlsReady ? <MobileControls /> : null}
     </div>
   );
 }

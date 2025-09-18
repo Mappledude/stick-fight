@@ -1,5 +1,6 @@
 import { getFirebaseConfig } from '../config/firebaseConfig';
 import { debugLog } from './debug';
+import { getFirebaseApp, getFirebaseAuth } from './firebase';
 
 const DEVICE_ID_KEY = 'deviceId';
 const LOG_PREFIX = '[AUTH]';
@@ -104,4 +105,17 @@ export async function ensureSignedInUser(): Promise<{ auth: FirebaseAuth; user: 
   const deviceId = getDeviceId();
   debugLog(`${LOG_PREFIX} uid=${result.user.uid} deviceId=${deviceId}`);
   return result;
+}
+
+type EnsureAppAndUserResult = {
+  app: ReturnType<typeof getFirebaseApp>;
+  auth: ReturnType<typeof getFirebaseAuth>;
+  user: { uid: string };
+};
+
+export async function ensureAppAndUser(): Promise<EnsureAppAndUserResult> {
+  const app = getFirebaseApp();
+  const auth = getFirebaseAuth();
+  const { user } = await ensureSignedInUser();
+  return { app, auth, user };
 }
