@@ -376,6 +376,8 @@
 
   const lobbyRoomsState = {
     rooms: [],
+    roomMetadata: {},
+    playerListeners: {},
     unsubscribe: null,
     listening: false,
   };
@@ -1643,54 +1645,187 @@ try {
     });
   };
 
+const updateRoomsFromMetadata = () => {
+  const metadata = lobbyRoomsState.roomMetadata || {};
+  lobbyRoomsState.rooms = Object.keys(metadata).map((code) => {
+    const entry = metadata[code] || {};
+    const maxPlayers =
+      typeof entry.maxPlayers === 'number' && entry.maxPlayers > 0 ? entry.maxPlayers : undefined;
+    const playerNames = Array.isArray(entry.playerNames) ? entry.playerNames.slice() : [];
+    const playerCount =
+      typeof entry.playerCount === 'number' && entry.playerCount >= 0
+        ? entry.playerCount
+        : playerNames.length;
+    return {
+      code,
+      roomName: typeof entry.roomName === 'string' ? entry.roomName : '',
+      playerCount,
+      maxPlayers,
+      playerNames,
+    };
+  });
+  updateRoomsTable();
+};
+
+const detachPlayerListener = (roomId) => {
+  if (!roomId) return;
+  lobbyRoomsState.playerListeners = lobbyRoomsState.playerListeners || {};
+  const unsubscribe = lobbyRoomsState.playerListeners[roomId];
+  if (typeof unsubscribe === 'function') {
+    try {
+      unsubscribe();
+    } catch (error) {
+      handleFirestoreError('listen', error);
+    }
+  }
+  delete lobbyRoomsState.playerListeners[roomId];
+};
+
+const attachPlayerListener = (docRef, roomId) => {
+  if (!docRef || !roomId) return;
+  lobbyRoomsState.playerListeners = lobbyRoomsState.playerListeners || {};
+  if (lobbyRoomsState.playerListeners[roomId]) return;
+
+  try {
+    const unsubscribe = docRef.collection('players').onSnapshot(
+      (playersSnapshot) => {
+        const metadata = lobbyRoomsState.roomMetadata || (lobbyRoomsState.roomMetadata = {});
+        const entry = metadata[roomId] || (metadata[roomId] = {});
+        const names = [];
+        playersSnapshot.forEach((playerDoc) => {
+          const d = (playerDoc && playerDoc.data) ? playerDoc.data() || {} : {};
+          const nick = typeof d.nick === 'string' ? d.nick.trim() : '';
+          const name = typeof d.name === 'string' ? d.name.trim() : '';
+          const label = nick || name;
+          if (label) names.push(label);
+        });
+        entry.playerNames = names;
+        entry.playerCount = playersSnapshot.size;
+        lobbyRoomsState.roomMetadata = metadata;
+        updateRoomsFromMetadata();
+      },
+      (error) => handleFirestoreError('listen', error)
+    );
+    lobbyRoomsState.playerListeners[roomId] = unsubscribe;
+  } catch (error) {
+    handleFirestoreError('listen', error);
+  }
+};
+
+const refreshRoomsFromSnapshot = (snapshot) => {
+  const docs = snapshot && snapshot.docs ? snapshot.docs : [];
+  const metadata = {};
+
+  docs.forEach((doc) => {
+    const data = doc.data ? doc.data() || {} : {};
+    const roomId = doc.id;
+    metadata[roomId] = {
+      roomName: typeof data.roomName === 'string' ? data.roomName.trim() : '',
+      maxPlayers:
+        typeof data.maxPlayers === 'number' && data.maxPlayers > 0 ? data.maxPlayers : undefined,
+      // May be overridden by player listener; keep initial value if provided:
+      playerCount:
+        typeof data.playerCount === 'number' && data.playerCount >= 0 ? data.playerCount : undefined,
+      playerNames: [],
+    };
+    // Ensure we have a live listener for players in this room
+    attachPlayerListener(doc.ref, roomId);
+  });
+
+  // Detach listeners for rooms that no longer exist
+  lobbyRoomsState.playerListeners = lobbyRoomsState.playerListeners || {};
+  Object.keys(lobbyRoomsState.playerListeners).forEach((roomId) => {
+    if (!metadata[roomId]) {
+      detachPlayerListener(roomId);
+    }
+  });
+
+  lobbyRoomsState.roomMetadata = metadata;
+  updateRoomsFromMetadata();
+};
+
+          }
+          const names = [];
+          playersSnapshot.forEach((playerDoc) => {
+            const playerData = playerDoc && typeof playerDoc.data === 'function' ? playerDoc.data() || {} : {};
+            const rawName = typeof playerData.name === 'string' ? playerData.name : '';
+            const trimmed = rawName.trim();
+            if (trimmed) {
+              names.push(trimmed);
+            }
+          });
+          entry.playerCount = playersSnapshot.size;
+          entry.playerNames = names;
+          updateRoomsFromMetadata();
+        },
+        (error) => {
+          handleFirestoreError('listen', error);
+        }
+      );
+      lobbyRoomsState.playerListeners[roomId] = unsubscribe;
+    } catch (error) {
+      handleFirestoreError('listen', error);
+    }
+  };
+
   const refreshRoomsFromSnapshot = async (snapshot) => {
     const docs = snapshot && snapshot.docs ? snapshot.docs : [];
-    const processed = await Promise.all(
-      docs.map(async (doc) => {
-        const data = doc.data ? doc.data() || {} : {};
-        let playerCount = typeof data.playerCount === 'number' ? data.playerCount : null;
-        let maxPlayers = typeof data.maxPlayers === 'number' ? data.maxPlayers : null;
-        const roomName = typeof data.roomName === 'string' ? data.roomName.trim() : '';
-        let playerNames = [];
-        let playersSnapshot = null;
-        try {
-          playersSnapshot = await doc.ref.collection('players').get();
-          const playersDocs = playersSnapshot && playersSnapshot.docs ? playersSnapshot.docs : [];
-          playerNames = playersDocs
-            .map((playerDoc) => {
-              const playerData = playerDoc && playerDoc.data ? playerDoc.data() || {} : {};
-              const nick = typeof playerData.nick === 'string' ? playerData.nick.trim() : '';
-              const name = typeof playerData.name === 'string' ? playerData.name.trim() : '';
-              return nick || name;
-            })
-            .filter((value) => !!value);
-        } catch (error) {
-          handleFirestoreError('listen', error);
-          playerNames = [];
-        }
-        if (playerCount === null) {
-          if (playersSnapshot) {
-            playerCount = playersSnapshot.size;
-          } else {
-            playerCount = playerNames.length;
-          }
-        }
-        if (maxPlayers === null) {
-          maxPlayers = 0;
-        }
-        return {
-          code: doc.id,
-          playerCount,
-          maxPlayers: maxPlayers || undefined,
-          roomName,
-          playerNames,
-        };
-      })
-    );
-    lobbyRoomsState.rooms = processed;
+    const metadata = lobbyRoomsState.roomMetadata || {};
+    const activeRoomIds = new Set();
+
+    docs.forEach((doc) => {
+      const code = doc && doc.id ? doc.id : '';
+      if (!code) {
+        return;
+      }
+      activeRoomIds.add(code);
+      const data = doc.data ? doc.data() || {} : {};
+      const entry = metadata[code] || { code, playerNames: [] };
+      entry.code = code;
+      entry.roomName = typeof data.roomName === 'string' ? data.roomName : entry.roomName || '';
+      if (typeof data.playerCount === 'number') {
+        entry.playerCount = data.playerCount;
+      } else if (typeof entry.playerCount !== 'number') {
+        entry.playerCount = 0;
+      }
+      entry.maxPlayers =
+        typeof data.maxPlayers === 'number' ? data.maxPlayers : entry.maxPlayers;
+      metadata[code] = entry;
+      attachPlayerListener(doc.ref, code);
+    });
+
+    Object.keys(metadata).forEach((code) => {
+      if (activeRoomIds.has(code)) return;
+      detachPlayerListener(code);
+      delete metadata[code];
+    });
+
+    lobbyRoomsState.roomMetadata = metadata;
+    updateRoomsFromMetadata();
+    const count = docs.length;
+    logMessage('[LOBBY]', `rooms=${count}`);
+    return count;
+  };
+
+  const stopLobbyRoomsListener = () => {
+    const listeners = lobbyRoomsState.playerListeners || {};
+    Object.keys(listeners).forEach((roomId) => {
+      detachPlayerListener(roomId);
+    });
+    lobbyRoomsState.playerListeners = {};
+    lobbyRoomsState.roomMetadata = {};
+    lobbyRoomsState.rooms = [];
+    if (typeof lobbyRoomsState.unsubscribe === 'function') {
+      try {
+        lobbyRoomsState.unsubscribe();
+      } catch (error) {
+        handleFirestoreError('listen', error);
+      }
+    }
+    lobbyRoomsState.unsubscribe = null;
+    lobbyRoomsState.listening = false;
+
     updateRoomsTable();
-    logMessage('[LOBBY]', `rooms=${processed.length}`);
-    return processed.length;
   };
 
   const startLobbyRoomsListener = async () => {
@@ -2067,6 +2202,7 @@ await withFirestoreErrorHandling('listen', async () => {
     if (overlayState.overlay) {
       overlayState.overlay.classList.add('stickfight-hidden');
     }
+    stopLobbyRoomsListener();
   };
 
   const showOverlay = () => {
@@ -2900,6 +3036,7 @@ await withFirestoreErrorHandling('listen', async () => {
     buildShareUrl,
     hideOverlay,
     showOverlay,
+    stopLobbyRoomsListener,
     adminCreateRoom,
     adminDeleteRoomByCode,
     adminDeleteAllRooms,
