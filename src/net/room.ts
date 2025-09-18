@@ -21,6 +21,7 @@ export type RoomHandle = {
 export async function mountRoom(options: RoomMountOptions): Promise<RoomHandle> {
   const { roomCode, uid, canvas, name, color, onPlayersChange } = options;
   const playersState: PlayerMap = new Map();
+  let selfSprite: PlayerPresence | null = null;
 
   const notify = () => {
     if (typeof onPlayersChange === 'function') {
@@ -31,16 +32,18 @@ export async function mountRoom(options: RoomMountOptions): Promise<RoomHandle> 
   const getPlayers = () => playersState;
   const getPlayer = (id: string) => playersState.get(id);
   const setLocalPos = ({ x, y, dir }: { x: number; y: number; dir: 'L' | 'R' }) => {
-    const existing = playersState.get(uid);
+    const existing = playersState.get(uid) || selfSprite;
     const base: PlayerPresence = existing || {
       uid,
-      name,
-      color,
+      name: name || `You-${uid.slice(0, 4)}`,
+      color: color || '#37A9FF',
       x,
       y,
       dir,
     };
-    playersState.set(uid, { ...base, x, y, dir });
+    const next: PlayerPresence = { ...base, x, y, dir };
+    playersState.set(uid, next);
+    selfSprite = next;
     notify();
   };
 
@@ -53,24 +56,29 @@ export async function mountRoom(options: RoomMountOptions): Promise<RoomHandle> 
     presenceHandle = await enterRoom(roomCode, uid, { name, color });
     const { payload } = presenceHandle;
     playersState.set(uid, { ...payload });
+    selfSprite = { ...payload };
     notify();
 
     unsubscribe = watchPlayers(roomCode, uid, (map) => {
       map.forEach((value, key) => {
         if (key === uid) {
-          const local = playersState.get(uid);
-          if (local) {
-            playersState.set(uid, { ...value, x: local.x, y: local.y, dir: local.dir });
-          } else {
-            playersState.set(uid, value);
-          }
+          const local = playersState.get(uid) || selfSprite;
+          const merged = local
+            ? { ...value, x: local.x, y: local.y, dir: local.dir }
+            : value;
+          playersState.set(uid, merged);
+          selfSprite = merged;
         } else {
           playersState.set(key, value);
         }
       });
 
+      if (!map.has(uid) && selfSprite) {
+        playersState.set(uid, selfSprite);
+      }
+
       Array.from(playersState.keys()).forEach((key) => {
-        if (!map.has(key)) {
+        if (key !== uid && !map.has(key)) {
           playersState.delete(key);
         }
       });
