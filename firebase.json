@@ -3,11 +3,18 @@
     "source": "functions"
   },
   "hosting": {
+    "site": "stick-fight-pigeon",
     "public": "public",
     "ignore": [
       "firebase.json",
       "**/.*",
       "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
     ]
   }
 }
