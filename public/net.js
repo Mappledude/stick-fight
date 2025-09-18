@@ -833,126 +833,84 @@ const { auth, user } = guardResult || (await ensureSignedInUser());
       throw new Error('Room ID is invalid.');
     }
     const peerId = generatePeerId();
-let alreadyPresent = false;
+    const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
+    const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
+    let alreadyPresent = false;
 
-await withFirestoreErrorHandling('update', async () => {
-  const firestore = ensureFirestore();
-  const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
+    await withFirestoreErrorHandling('update', async () => {
+      const getST =
+        (typeof getServerTimestamp === 'function' && getServerTimestamp) ||
+        (() => (typeof getTimestampValue === 'function' ? getTimestampValue() : new Date()));
 
-  const getST =
-    (typeof getServerTimestamp === 'function' && getServerTimestamp) ||
-    (() => (typeof getTimestampValue === 'function' ? getTimestampValue() : new Date()));
+      const deviceId =
+        (typeof getDeviceId === 'function' && getDeviceId()) ||
+        (window.NetUI && typeof window.NetUI.getDeviceId === 'function' ? window.NetUI.getDeviceId() : null);
 
-  const deviceId =
-    (typeof getDeviceId === 'function' && getDeviceId()) ||
-    (window.NetUI && typeof window.NetUI.getDeviceId === 'function' ? window.NetUI.getDeviceId() : null);
+      const playersCollection = roomRef.collection('players');
 
-  const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
-  const playersCollection = roomRef.collection('players');
+      // Pre-read for presence & capacity snapshot
+      const [existingPlayerDoc, playersSnapshot] = await Promise.all([
+        playerDocRef.get(),
+        playersCollection.get(),
+      ]);
+      alreadyPresent = !!(existingPlayerDoc && existingPlayerDoc.exists);
 
-  // Pre-read for presence & capacity snapshot
-  const [existingPlayerDoc, playersSnapshot] = await Promise.all([
-    playerDocRef.get(),
-    playersCollection.get(),
-  ]);
-  alreadyPresent = !!(existingPlayerDoc && existingPlayerDoc.exists);
-
-  await runTransaction(async (transaction) => {
-    // Room existence
-    const roomSnapshot = await transaction.get(roomRef);
-    if (!roomSnapshot || !roomSnapshot.exists) {
-      throw new Error('The requested room could not be found.');
-    }
-
-    const roomData = roomSnapshot.data() || {};
-    const maxPlayers = typeof roomData.maxPlayers === 'number' ? roomData.maxPlayers : 9;
-
-    // Capacity guard
-    if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
-      throw new Error('This room is already full.');
-    }
-
-    // Player payload (device-lock + identity)
-    const playerData = {
-      uid: currentUser.uid,
-      deviceId,
-      nick: resolvedName,
-      lastSeenAt: getST(),
-    };
-    if (!alreadyPresent) {
-      playerData.joinedAt = getST();
-    }
-
-    // Write player doc
-    if (alreadyPresent) {
-      transaction.update(playerDocRef, playerData);
-    } else {
-      transaction.set(playerDocRef, playerData);
-    }
-
-    // Room metadata touch (+increment playerCount on first join)
-    const updates = {
-      updatedAt: getST(),
-      lastActivityAt: getST(),
-    };
-    if (!alreadyPresent) {
-      if (netState.fieldValue && typeof netState.fieldValue.increment === 'function') {
-        updates.playerCount = netState.fieldValue.increment(1);
-      } else {
-        const currentCount =
-          typeof roomData.playerCount === 'number' ? roomData.playerCount : playersSnapshot.size;
-        updates.playerCount = currentCount + 1;
-      }
-    }
-
-    transaction.set(roomRef, updates, { merge: true });
-  });
-});
-
+      await runTransaction(async (transaction) => {
+        // Room existence
+        const roomSnapshot = await transaction.get(roomRef);
+        if (!roomSnapshot || !roomSnapshot.exists) {
+          throw new Error('The requested room could not be found.');
         }
+
         const roomData = roomSnapshot.data() || {};
         const maxPlayers = typeof roomData.maxPlayers === 'number' ? roomData.maxPlayers : 9;
+
+        // Capacity guard
         if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
           throw new Error('This room is already full.');
         }
-        const now = getTimestampValue();
-        transaction.set(playerDocRef, {
+
+        const timestamp = getST();
+
+        // Player payload (device-lock + identity)
+        const playerData = {
           uid: currentUser.uid,
           peerId,
-          name: resolvedName,
-          joinedAt: now,
+          role: 'guest',
           isHost: false,
-        });
+          deviceId,
+          nick: resolvedName,
+          lastSeenAt: timestamp,
+        };
+        if (!alreadyPresent) {
+          playerData.joinedAt = timestamp;
+        }
+
+        // Write player doc
+        if (alreadyPresent) {
+          transaction.update(playerDocRef, playerData);
+        } else {
+          transaction.set(playerDocRef, playerData);
+        }
+
+        // Room metadata touch (+increment playerCount on first join)
         const updates = {
-          updatedAt: now,
-          lastActivityAt: now,
+          updatedAt: timestamp,
+          lastActivityAt: timestamp,
         };
         if (!alreadyPresent) {
           if (netState.fieldValue && typeof netState.fieldValue.increment === 'function') {
             updates.playerCount = netState.fieldValue.increment(1);
           } else {
-            const currentCount = typeof roomData.playerCount === 'number' ? roomData.playerCount : playersSnapshot.size;
+            const currentCount =
+              typeof roomData.playerCount === 'number' ? roomData.playerCount : playersSnapshot.size;
             updates.playerCount = currentCount + 1;
           }
         }
-        transaction.update(roomRef, updates);
+
+        transaction.set(roomRef, updates, { merge: true });
       });
     });
-
-    try {
-      await playerDocRef.set(
-        {
-          peerId,
-          role: 'guest',
-          isHost: false,
-          name: resolvedName,
-          lastSeenAt: getServerTimestamp(),
-        },
-        { merge: true }
-      );
-    } catch (error) {
-      logMessage('[ROOM]', `failed to update player metadata code=${trimmedRoomId}`, error);
-    }
 
     netState.roomId = trimmedRoomId;
     netState.peerId = peerId;
