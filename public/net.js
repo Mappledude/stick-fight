@@ -28,6 +28,9 @@
   const bootFlags = Boot && Boot.flags ? Boot.flags : { debug: false, safe: false, nofs: false, nolobby: false };
   const NETWORK_DISABLED = !!(bootFlags.safe || bootFlags.nolobby);
 
+  const AUTO_JOIN_FROM_QUERY = false;
+  const AUTO_JOIN_FROM_STATE = false;
+
   if (NETWORK_DISABLED) {
     bootLog('ROUTE', 'net-module-disabled', { safe: bootFlags.safe, nolobby: bootFlags.nolobby });
   }
@@ -3197,7 +3200,11 @@ await withFirestoreErrorHandling('listen', async () => {
     setupRouter(initialRoute || '#/lobby');
 
     if (safeRoomId) {
-      joinLobbyByCode(safeRoomId);
+      if (AUTO_JOIN_FROM_QUERY) {
+        joinLobbyByCode(safeRoomId);
+      } else {
+        ensureLobbyView();
+      }
     } else if (roomId) {
       ensureLobbyView();
       setBannerMessage(
