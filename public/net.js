@@ -28,6 +28,7 @@
   const bootFlags = Boot && Boot.flags ? Boot.flags : { debug: false, safe: false, nofs: false, nolobby: false };
   const SAFE_MODE = !!bootFlags.safe;
   const NO_LOBBY_FLAG = !!bootFlags.nolobby;
+  // NOTE: Flags can disable networking/listeners, but must NOT suppress overlay/router.
   const NETWORK_DISABLED = SAFE_MODE || NO_LOBBY_FLAG;
 
   const AUTO_JOIN_FROM_QUERY = false;
@@ -2069,7 +2070,7 @@ await withFirestoreErrorHandling('listen', async () => {
   const handleAdminEntry = () => {
     logConfigScope('admin-handle-entry');
     overlayState.isAdmin = true;
-    goToRoute('#/admin');
+    navigateTo(ROUTE_ADMIN);
   };
 
   const attachAdminEntryHandler = () => {
@@ -2353,7 +2354,7 @@ await withFirestoreErrorHandling('listen', async () => {
     const backButton = overlayState.panel.querySelector('#stickfight-admin-back');
     if (backButton) {
       backButton.addEventListener('click', () => {
-        goToRoute('#/lobby');
+        navigateTo(ROUTE_LOBBY);
       });
     }
   };
@@ -2390,7 +2391,7 @@ await withFirestoreErrorHandling('listen', async () => {
         padding: 32px;
         background: rgba(3, 7, 12, 0.92);
         backdrop-filter: blur(6px);
-        z-index: 9999;
+        z-index: 10000;
         color: #f6fbff;
         font-family: 'Inter', 'Segoe UI', Roboto, sans-serif;
       }
@@ -2814,7 +2815,8 @@ await withFirestoreErrorHandling('listen', async () => {
     const normalizedView = activeView === 'admin' ? 'admin' : 'lobby';
     const navLink = (view, id, label) => {
       const isActive = normalizedView === view ? ' active' : '';
-      return `<a href="#/${view}" id="${id}" class="nav-link${isActive}">${label}</a>`;
+      const href = view === 'admin' ? '/admin' : '/lobby';
+      return `<a href="${href}" id="${id}" class="nav-link${isActive}">${label}</a>`;
     };
     const viewSection = (view) => {
       const hiddenClass = normalizedView === view ? '' : ' class="hidden"';
@@ -2839,6 +2841,7 @@ await withFirestoreErrorHandling('listen', async () => {
     const normalizedView = activeView === 'admin' ? 'admin' : 'lobby';
     overlayState.activeView = normalizedView;
     renderContent(renderLayout(normalizedView, bodyHtml), options);
+    wireNavigationLinks();
   };
 
   function renderKeyVerificationError(message) {
@@ -2910,6 +2913,7 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     try {
       locationRef.assign(target);
+      // Only hide the overlay for explicit player navigation into a room.
       hideOverlay();
       emitEvent('lobbyDismissed', { roomId: safeRoomId, isHost: !!isHost });
       return true;
@@ -3092,7 +3096,7 @@ await withFirestoreErrorHandling('listen', async () => {
           return;
         }
         setPlayerIdentity(fetchedIdentity);
-        goToRoute('#/lobby');
+        navigateTo(ROUTE_LOBBY);
       } catch (error) {
         const message = error && error.message ? error.message : 'Unable to verify the code word.';
         if (errorEl) {
@@ -3104,147 +3108,134 @@ await withFirestoreErrorHandling('listen', async () => {
     });
   };
 
-  const ROUTE_KEYS = Object.freeze({
-    ADMIN: '#/admin',
-    LOBBY: '#/lobby',
-  });
+  const ROUTE_ADMIN = '#/admin';
+  const ROUTE_LOBBY = '#/lobby';
 
-  const ROUTE_PATH_LOOKUP = Object.freeze({
-    '#/admin': '/admin',
-    '#/lobby': '/lobby',
-  });
+  function getLocationContext() {
+    if (typeof window !== 'undefined' && window.location) {
+      return { location: window.location, history: window.history || null };
+    }
+    if (typeof globalThis !== 'undefined' && globalThis.location) {
+      return { location: globalThis.location, history: globalThis.history || null };
+    }
+    return { location: null, history: null };
+  }
 
-  const sanitizeRouteValue = (value) => {
-    if (typeof value !== 'string') {
-      return '';
+  function getCurrentRoute() {
+    const { location } = getLocationContext();
+    if (!location) {
+      return { kind: 'lobby' };
     }
-    return value.trim().toLowerCase().replace(/^#/, '').replace(/^\/+/, '');
-  };
+    const path = (location.pathname || '').replace(/\/+$/, '');
+    const hash = location.hash || '';
 
-  const resolveRouteFromValue = (value) => {
-    const sanitized = sanitizeRouteValue(value);
-    if (!sanitized) {
-      return ROUTE_KEYS.LOBBY;
-    }
-    if (sanitized === 'admin') {
-      return ROUTE_KEYS.ADMIN;
-    }
-    if (sanitized === 'lobby') {
-      return ROUTE_KEYS.LOBBY;
-    }
-    return null;
-  };
-
-  const normalizeRouteKey = (value) => {
-    return resolveRouteFromValue(value) || ROUTE_KEYS.LOBBY;
-  };
-
-  const getCurrentRoute = () => {
-    if (typeof window === 'undefined' || !window.location) {
-      return ROUTE_KEYS.LOBBY;
-    }
-    const { hash, pathname } = window.location;
-    const hashRoute = resolveRouteFromValue(hash || '');
-    if (hash && hashRoute) {
-      return hashRoute;
-    }
-    const pathRoute = resolveRouteFromValue(pathname || '');
-    if (pathRoute) {
-      return pathRoute;
-    }
-    return ROUTE_KEYS.LOBBY;
-  };
-
-  const isRoomPath = (value) => {
-    return typeof value === 'string' && /^\/room\//i.test(value);
-  };
-
-  const canUsePathRouting = () => {
-    if (typeof window === 'undefined' || !window.location || !window.history) {
-      return false;
-    }
-    if (typeof window.history.replaceState !== 'function') {
-      return false;
-    }
-    const path = window.location.pathname || '';
-    return !isRoomPath(path);
-  };
-
-  const syncRouteToLocation = (route) => {
-    if (typeof window === 'undefined' || !window.location) {
-      return null;
-    }
-    const routePath = ROUTE_PATH_LOOKUP[route];
-    const pathname = window.location.pathname || '';
-    if (canUsePathRouting() && routePath) {
-      const search = window.location.search || '';
-      const desiredUrl = routePath + search;
-      if (pathname !== routePath || window.location.hash) {
-        window.history.replaceState(null, '', desiredUrl);
-        return 'path';
+    if (path.startsWith('/room/')) {
+      let code = path.slice('/room/'.length);
+      try {
+        code = decodeURIComponent(code);
+      } catch (error) {
+        code = path.slice('/room/'.length);
       }
-      return null;
+      return { kind: 'room', code };
     }
-    if (isRoomPath(pathname)) {
-      return null;
-    }
-    if (window.location.hash !== route) {
-      window.location.hash = route;
-      return 'hash';
-    }
-    return null;
-  };
 
-  const handleRoute = (routeOverride) => {
-    const routeKey = normalizeRouteKey(routeOverride || getCurrentRoute());
-    switch (routeKey) {
-      case '#/admin':
-        renderAdminPanel();
-        break;
-      case '#/lobby':
-      default:
-        renderCreateLobby();
-        break;
+    if (path === '/admin' || hash === ROUTE_ADMIN) {
+      return { kind: 'admin' };
     }
-  };
 
-  function goToRoute(route) {
-    const target = normalizeRouteKey(route);
-    if (typeof window === 'undefined' || !window.location) {
-      handleRoute(target);
+    if (path === '/lobby' || hash === ROUTE_LOBBY) {
+      return { kind: 'lobby' };
+    }
+
+    return { kind: 'lobby' };
+  }
+
+  function navigateTo(target) {
+    const { location, history } = getLocationContext();
+
+    if (typeof target === 'string') {
+      const routePath = target === ROUTE_ADMIN ? '/admin' : '/lobby';
+      if (history && typeof history.pushState === 'function') {
+        history.pushState(null, '', routePath);
+        renderRoute();
+        return;
+      }
+      if (location) {
+        location.hash = target === ROUTE_ADMIN ? ROUTE_ADMIN : ROUTE_LOBBY;
+        renderRoute();
+      }
       return;
     }
-    const current = getCurrentRoute();
-    if (current === target) {
-      handleRoute(target);
-      return;
-    }
-    const updateMode = syncRouteToLocation(target);
-    if (updateMode !== 'hash') {
-      handleRoute(target);
+
+    if (target && target.kind === 'room') {
+      const code = encodeURIComponent(target.code || '');
+      const routePath = `/room/${code}`;
+      if (history && typeof history.pushState === 'function') {
+        history.pushState(null, '', routePath);
+        renderRoute();
+        return;
+      }
+      if (location) {
+        if (typeof location.assign === 'function') {
+          location.assign(routePath);
+        } else {
+          location.href = routePath;
+        }
+      }
     }
   }
 
-  const setupRouter = (initialRoute) => {
-    const targetRoute = normalizeRouteKey(initialRoute || getCurrentRoute());
+  function wireNavigationLinks() {
+    if (!overlayState.panel) {
+      return;
+    }
+    const lobbyLink = overlayState.panel.querySelector('#link-lobby');
+    if (lobbyLink && !lobbyLink.__stickfightNav) {
+      lobbyLink.__stickfightNav = true;
+      lobbyLink.addEventListener('click', (event) => {
+        event.preventDefault();
+        navigateTo(ROUTE_LOBBY);
+      });
+    }
+    const adminLink = overlayState.panel.querySelector('#link-admin');
+    if (adminLink && !adminLink.__stickfightNav) {
+      adminLink.__stickfightNav = true;
+      adminLink.addEventListener('click', (event) => {
+        event.preventDefault();
+        navigateTo(ROUTE_ADMIN);
+      });
+    }
+  }
+
+  function renderRoute() {
+    const route = getCurrentRoute();
+    if (route.kind === 'room') {
+      overlayState.isAdmin = false;
+      hideOverlay();
+      return;
+    }
+    showOverlay();
+    if (route.kind === 'admin') {
+      overlayState.isAdmin = true;
+      renderAdminPanel();
+    } else {
+      overlayState.isAdmin = false;
+      renderCreateLobby();
+    }
+  }
+
+  function setupRouter() {
     if (overlayState.routeHandlerAttached) {
-      handleRoute(targetRoute);
+      renderRoute();
       return;
     }
-    if (typeof window === 'undefined') {
-      overlayState.routeHandlerAttached = true;
-      handleRoute(targetRoute);
-      return;
+    if (typeof window !== 'undefined') {
+      window.addEventListener('popstate', renderRoute);
+      window.addEventListener('hashchange', renderRoute);
     }
-    const onLocationChange = () => handleRoute();
-    window.addEventListener('hashchange', onLocationChange);
-    window.addEventListener('popstate', onLocationChange);
     overlayState.routeHandlerAttached = true;
-    const updateMode = syncRouteToLocation(targetRoute);
-    if (updateMode !== 'hash') {
-      handleRoute(targetRoute);
-    }
-  };
+    renderRoute();
+  }
 
   const initializeOverlayFlow = async (opts = {}) => {
     const skipNetwork = !!opts.skipNetwork;
@@ -3258,11 +3249,16 @@ await withFirestoreErrorHandling('listen', async () => {
       return;
     }
     if (!skipNetwork) {
-      await startLobbyRoomsListener();
+      try {
+        await startLobbyRoomsListener();
+      } catch (error) {
+        handleFirestoreError('listen', error);
+      }
     } else {
-      logMessage('[LOBBY]', 'network listeners disabled — overlay shell only');
+      logMessage('[LOBBY]', 'network listeners disabled — UI only');
       updateRoomsTable();
     }
+    setupRouter();
     const search = (typeof window !== 'undefined' && window.location && window.location.search) || '';
     let roomId = '';
     if (typeof URLSearchParams === 'function') {
@@ -3277,19 +3273,14 @@ await withFirestoreErrorHandling('listen', async () => {
       roomId = match ? decodeURIComponent(match[1]) : '';
     }
     const safeRoomId = sanitizeRoomId(roomId);
-    let initialRoute = null;
-    if (typeof window !== 'undefined' && window.location && window.location.hash) {
-      initialRoute = normalizeRouteKey(window.location.hash);
-    }
-    setupRouter(initialRoute || '#/lobby');
-
+    const currentRoute = getCurrentRoute();
     if (safeRoomId) {
       if (AUTO_JOIN_FROM_QUERY) {
         joinLobbyByCode(safeRoomId);
-      } else {
+      } else if (currentRoute.kind === 'lobby') {
         ensureLobbyView();
       }
-    } else if (roomId) {
+    } else if (roomId && currentRoute.kind === 'lobby') {
       ensureLobbyView();
       setBannerMessage(
         'The lobby link you followed is missing or invalid. You can create a new game to get started.'
@@ -3297,17 +3288,17 @@ await withFirestoreErrorHandling('listen', async () => {
     }
   };
 
-  const initWhenReady = () => {
+  async function initWhenReady() {
     if (typeof document === 'undefined') {
       return;
     }
-    const startOverlay = () => initializeOverlayFlow({ skipNetwork: SAFE_MODE || NO_LOBBY_FLAG });
+    const start = () => initializeOverlayFlow({ skipNetwork: SAFE_MODE || NO_LOBBY_FLAG });
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', startOverlay, { once: true });
+      document.addEventListener('DOMContentLoaded', start, { once: true });
     } else {
-      startOverlay();
+      await start();
     }
-  };
+  }
 
   initWhenReady();
 
@@ -3338,7 +3329,7 @@ await withFirestoreErrorHandling('listen', async () => {
     },
     showAdminPanel: () => {
       overlayState.isAdmin = true;
-      goToRoute('#/admin');
+      navigateTo(ROUTE_ADMIN);
     },
   });
 })(typeof window !== 'undefined' ? window : this);
