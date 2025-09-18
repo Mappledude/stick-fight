@@ -3102,21 +3102,95 @@ await withFirestoreErrorHandling('listen', async () => {
     });
   };
 
+  const ROUTE_KEYS = Object.freeze({
+    ADMIN: '#/admin',
+    LOBBY: '#/lobby',
+  });
+
+  const ROUTE_PATH_LOOKUP = Object.freeze({
+    '#/admin': '/admin',
+    '#/lobby': '/lobby',
+  });
+
+  const sanitizeRouteValue = (value) => {
+    if (typeof value !== 'string') {
+      return '';
+    }
+    return value.trim().toLowerCase().replace(/^#/, '').replace(/^\/+/, '');
+  };
+
+  const resolveRouteFromValue = (value) => {
+    const sanitized = sanitizeRouteValue(value);
+    if (!sanitized) {
+      return ROUTE_KEYS.LOBBY;
+    }
+    if (sanitized === 'admin') {
+      return ROUTE_KEYS.ADMIN;
+    }
+    if (sanitized === 'lobby') {
+      return ROUTE_KEYS.LOBBY;
+    }
+    return null;
+  };
+
   const normalizeRouteKey = (value) => {
-    if (value === '#/admin' || value === '#/lobby') {
-      return value;
-    }
-    if (value === '#admin') {
-      return '#/admin';
-    }
-    return '#/lobby';
+    return resolveRouteFromValue(value) || ROUTE_KEYS.LOBBY;
   };
 
   const getCurrentRoute = () => {
     if (typeof window === 'undefined' || !window.location) {
-      return '#/lobby';
+      return ROUTE_KEYS.LOBBY;
     }
-    return normalizeRouteKey(window.location.hash || '');
+    const { hash, pathname } = window.location;
+    const hashRoute = resolveRouteFromValue(hash || '');
+    if (hash && hashRoute) {
+      return hashRoute;
+    }
+    const pathRoute = resolveRouteFromValue(pathname || '');
+    if (pathRoute) {
+      return pathRoute;
+    }
+    return ROUTE_KEYS.LOBBY;
+  };
+
+  const isRoomPath = (value) => {
+    return typeof value === 'string' && /^\/room\//i.test(value);
+  };
+
+  const canUsePathRouting = () => {
+    if (typeof window === 'undefined' || !window.location || !window.history) {
+      return false;
+    }
+    if (typeof window.history.replaceState !== 'function') {
+      return false;
+    }
+    const path = window.location.pathname || '';
+    return !isRoomPath(path);
+  };
+
+  const syncRouteToLocation = (route) => {
+    if (typeof window === 'undefined' || !window.location) {
+      return null;
+    }
+    const routePath = ROUTE_PATH_LOOKUP[route];
+    const pathname = window.location.pathname || '';
+    if (canUsePathRouting() && routePath) {
+      const search = window.location.search || '';
+      const desiredUrl = routePath + search;
+      if (pathname !== routePath || window.location.hash) {
+        window.history.replaceState(null, '', desiredUrl);
+        return 'path';
+      }
+      return null;
+    }
+    if (isRoomPath(pathname)) {
+      return null;
+    }
+    if (window.location.hash !== route) {
+      window.location.hash = route;
+      return 'hash';
+    }
+    return null;
   };
 
   const handleRoute = (routeOverride) => {
@@ -3138,12 +3212,15 @@ await withFirestoreErrorHandling('listen', async () => {
       handleRoute(target);
       return;
     }
-    const current = normalizeRouteKey(window.location.hash || '');
+    const current = getCurrentRoute();
     if (current === target) {
       handleRoute(target);
       return;
     }
-    window.location.hash = target;
+    const updateMode = syncRouteToLocation(target);
+    if (updateMode !== 'hash') {
+      handleRoute(target);
+    }
   }
 
   const setupRouter = (initialRoute) => {
@@ -3157,13 +3234,12 @@ await withFirestoreErrorHandling('listen', async () => {
       handleRoute(targetRoute);
       return;
     }
-    const onHashChange = () => handleRoute();
-    window.addEventListener('hashchange', onHashChange);
+    const onLocationChange = () => handleRoute();
+    window.addEventListener('hashchange', onLocationChange);
+    window.addEventListener('popstate', onLocationChange);
     overlayState.routeHandlerAttached = true;
-    const current = normalizeRouteKey(window.location.hash || '');
-    if (!window.location.hash || current !== targetRoute) {
-      window.location.hash = targetRoute;
-    } else {
+    const updateMode = syncRouteToLocation(targetRoute);
+    if (updateMode !== 'hash') {
       handleRoute(targetRoute);
     }
   };
