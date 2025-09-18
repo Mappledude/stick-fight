@@ -58,11 +58,11 @@ export async function mountRoom(options: RoomMountOptions): Promise<RoomHandle> 
       color: presenceHandle.meta.color,
       x: spawn.x,
       y: spawn.y,
-      dir: 'R',
+      dir: spawn.dir,
     });
     notify();
 
-    unsubscribe = watchPlayers(roomCode, (map) => {
+    unsubscribe = watchPlayers(roomCode, uid, (map) => {
       map.forEach((value, key) => {
         if (key === uid) {
           const local = playersState.get(uid);
