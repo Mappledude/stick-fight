@@ -14,7 +14,6 @@ import { watchPlayers, type PlayerPresence as Player } from '../net/playersStore
 import { attachControls } from '../net/controls';
 import { setLocalContext, clearLocalContext } from '../net/send';
 import { startConsuming, stopConsuming } from '../net/consume';
-import MobileControls from '../ui/controls/MobileControls';
 
 const LOCAL_PLACEHOLDER_UID = 'local-temp';
 
@@ -287,8 +286,6 @@ export default function RoomView(): JSX.Element {
     };
   }, [roomCode, selfUid]);
 
-  const controlsReady = selfUid !== LOCAL_PLACEHOLDER_UID;
-
   const handleLeaveRoom = useCallback(async () => {
     if (leavingRef.current) {
       return;
@@ -320,7 +317,6 @@ export default function RoomView(): JSX.Element {
           <div className="room-stage-line" />
         </div>
       </section>
-      {controlsReady ? <MobileControls /> : null}
     </div>
   );
 }
