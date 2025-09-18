@@ -1204,7 +1204,11 @@ await withFirestoreErrorHandling('listen', async () => {
     const promptFn = typeof window !== 'undefined' && typeof window.prompt === 'function' ? window.prompt : null;
     const alertFn = typeof window !== 'undefined' && typeof window.alert === 'function' ? window.alert : null;
     const code = promptFn ? promptFn('Enter admin code') : null;
-    if (code === '808080') {
+    const trimmedCode = typeof code === 'string' ? code.trim() : '';
+    if (code !== null) {
+      logMessage('[ADMIN]', 'code-entered');
+    }
+    if (trimmedCode === '808080') {
       try {
         overlayState.adminOverride = true;
         await ensureAdminPrivileges({ forceRefresh: true });
@@ -1224,9 +1228,73 @@ await withFirestoreErrorHandling('listen', async () => {
           alertFn(message);
         }
       }
-    } else if (code && code.trim()) {
-      if (alertFn) {
-        alertFn('Invalid admin code.');
+    } else if (trimmedCode) {
+      if (bootFlags && bootFlags.safe) {
+        if (alertFn) {
+          alertFn('Invalid admin code.');
+        }
+        return;
+      }
+      if (NETWORK_DISABLED) {
+        if (alertFn) {
+          alertFn('Invalid admin code.');
+        }
+        return;
+      }
+      try {
+        const { auth, user } = await ensureSignedInUser();
+        const firebase = firebaseNamespace();
+        if (!firebase || typeof firebase.functions !== 'function') {
+          throw new Error('Firebase Functions SDK is not available.');
+        }
+        const app = ensureFirebaseApp();
+        const functions = firebase.functions(app);
+        if (!functions || typeof functions.httpsCallable !== 'function') {
+          throw new Error('Firebase Functions SDK is not available.');
+        }
+        const callable = functions.httpsCallable('grantAdminByCode');
+        await callable({ code: trimmedCode });
+        logMessage('[ADMIN]', 'claim-grant call=ok');
+
+        const activeAuth = auth || ensureAuth();
+        const currentUser = (activeAuth && activeAuth.currentUser) || user || null;
+        if (!currentUser || typeof currentUser.getIdToken !== 'function' || typeof currentUser.getIdTokenResult !== 'function') {
+          throw new Error('Unable to refresh admin token.');
+        }
+
+        await currentUser.getIdToken(true);
+        const tokenResult = await currentUser.getIdTokenResult();
+        const claims = (tokenResult && tokenResult.claims) || {};
+        const hasAdminClaim = claimsContainAdmin(claims);
+        logMessage('[ADMIN]', `token-refreshed admin=${hasAdminClaim ? 'true' : 'false'}`);
+        overlayState.claims = claims;
+
+        if (!hasAdminClaim) {
+          overlayState.isAdmin = false;
+          setBannerMessage('[ADMIN][WARN] Admin privileges are still pending. Please try again later.');
+          return;
+        }
+
+        try {
+          await ensureAdminPrivileges({ forceRefresh: true });
+        } catch (error) {
+          logMessage('[ADMIN]', 'claim-verification failed', error);
+          overlayState.isAdmin = false;
+          setBannerMessage('[ADMIN][ERR] Failed to verify admin privileges.');
+          return;
+        }
+
+        overlayState.isAdmin = true;
+        overlayState.adminOverride = false;
+        setBannerMessage(null);
+        renderAdminPanel();
+      } catch (error) {
+        logMessage('[ADMIN]', 'claim-grant error', error);
+        overlayState.isAdmin = false;
+        if (alertFn) {
+          const message = error && typeof error.message === 'string' ? error.message : 'Invalid admin code.';
+          alertFn(message);
+        }
       }
     }
   };
