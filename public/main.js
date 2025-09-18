@@ -3596,7 +3596,7 @@ this.teardownNetworking && this.teardownNetworking();
       if (stageLine) {
         stageLine.setVisible(true);
         stageLine.setDepth(1000);
-        stageLine.lineStyle(2, 0xffffff, 1);
+        stageLine.lineStyle(2, 0xff2a2a, 1);
         const midY = play.y + play.h / 2;
         stageLine.beginPath();
         stageLine.moveTo(play.x, midY);
