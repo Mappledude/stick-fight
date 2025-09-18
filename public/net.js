@@ -61,14 +61,16 @@
     bannerMessage: null,
     activeView: 'lobby',
     routeHandlerAttached: false,
-    adminAddCode: '',
+invalidRoomLink: false,
+adminAddCode: '',
+
     selectedStructure: '',
   };
 
-  const ADMIN_ADD_CODE_STORAGE_KEY = 'stickfight.adminAddCode';
   const PLAYER_IDENTITY_STORAGE_KEY = 'stickfight.playerIdentity';
   const DEFAULT_IDENTITY_COLOR = '#FFFFFF';
   const IDENTITY_COLOR_REGEX = /^#[0-9A-F]{6}$/;
+  const ADMIN_ADD_PLAYER_CODE = '808080';
 
   const identityState = {
     loaded: false,
@@ -356,28 +358,16 @@
     return upper;
   };
 
-  const getStoredAdminAddCode = () => {
-    if (overlayState.adminAddCode && overlayState.adminAddCode.trim()) {
-      return overlayState.adminAddCode.trim();
-    }
-    const stored = readSessionValue(ADMIN_ADD_CODE_STORAGE_KEY);
-    if (stored && stored.trim()) {
-      overlayState.adminAddCode = stored.trim();
-      return overlayState.adminAddCode;
-    }
-    return '';
-  };
-
-  const persistAdminAddCode = (value) => {
-    const sanitized = typeof value === 'string' ? value.trim() : '';
-    overlayState.adminAddCode = sanitized;
-    writeSessionValue(ADMIN_ADD_CODE_STORAGE_KEY, sanitized);
-  };
-
   const lobbyRoomsState = {
     rooms: [],
     roomMetadata: {},
     playerListeners: {},
+    unsubscribe: null,
+    listening: false,
+  };
+
+  const adminPlayersState = {
+    players: [],
     unsubscribe: null,
     listening: false,
   };
@@ -1343,7 +1333,7 @@ const deleteRoomDocument = async (roomRef) =>
     return { codeWord };
   };
 
-  const adminCreateRoom = async () => {
+  const adminCreateRoom = async (options = {}) => {
     logConfigScope('admin-create-room');
     const { user } = await ensureAdminPrivileges();
     if (!user || !user.uid) {
@@ -1354,11 +1344,19 @@ const deleteRoomDocument = async (roomRef) =>
       guardResult = await ensureAppAndUser();
       logAppAndUserGuard(guardResult);
     }
+    const roomOptions = typeof options === 'object' && options ? options : {};
+    const requestedName =
+      typeof roomOptions.roomName === 'string' && roomOptions.roomName.trim()
+        ? sanitizeRoomName(roomOptions.roomName)
+        : '';
+    const resolvedRoomName = requestedName || 'Admin Room';
+    const resolvedStructure = normalizeStructureValue(roomOptions.structure);
+
     const record = await createRoomRecord({
       hostUid: user.uid,
       hostName: 'Admin',
-      roomName: 'Admin Room',
-      structure: getDefaultRoomStructure(),
+      roomName: resolvedRoomName,
+      structure: resolvedStructure,
     });
     logMessage('[ROOM]', `created id=${record.roomId} code=${record.roomId}`);
     return {
@@ -1557,7 +1555,7 @@ return withFirestoreErrorHandling('update', async () => {
             <td>${roomLabel}</td>
             <td>${escapeHtml(String(countText))}</td>
             <td class="stickfight-join-cell">
-              <button type="button" class="stickfight-secondary-button stickfight-room-join" data-room-code="${code}">Join</button>
+              <button type="button" class="stickfight-primary-button stickfight-room-join" data-room-code="${code}">Join</button>
             </td>
             <td>${namesText}</td>
           </tr>
@@ -1579,6 +1577,55 @@ return withFirestoreErrorHandling('update', async () => {
         </tbody>
       </table>
     `;
+  };
+
+  const renderAdminRoomsTableMarkup = () => {
+    if (!lobbyRoomsState.rooms || lobbyRoomsState.rooms.length === 0) {
+      return '<p class="stickfight-empty">No rooms available.</p>';
+    }
+    const rows = lobbyRoomsState.rooms
+      .slice()
+      .sort((a, b) => a.code.localeCompare(b.code))
+      .map((room) => {
+        const code = escapeHtml(room.code);
+        const maxPlayers = typeof room.maxPlayers === 'number' && room.maxPlayers > 0 ? room.maxPlayers : null;
+        const countText = maxPlayers ? `${room.playerCount}/${maxPlayers}` : `${room.playerCount}`;
+        return `
+          <tr>
+            <td>${code}</td>
+            <td>${escapeHtml(String(countText))}</td>
+            <td class="stickfight-admin-room-actions">
+              <button type="button" class="stickfight-primary-button stickfight-admin-room-delete" data-room-code="${code}">Delete</button>
+            </td>
+          </tr>
+        `;
+      })
+      .join('');
+    return `
+      <table class="stickfight-admin-table">
+        <thead>
+          <tr>
+            <th>Code</th>
+            <th>Players</th>
+            <th>Delete</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows}
+        </tbody>
+      </table>
+    `;
+  };
+
+  const updateAdminRoomsTable = () => {
+    if (!overlayState.panel) {
+      return;
+    }
+    const container = overlayState.panel.querySelector('#stickfight-admin-rooms-table');
+    if (!container) {
+      return;
+    }
+    container.innerHTML = renderAdminRoomsTableMarkup();
   };
 
   const updateRoomsTable = () => {
@@ -1643,6 +1690,131 @@ try {
 
       });
     });
+    updateAdminRoomsTable();
+  };
+
+  const renderAdminPlayersTableMarkup = () => {
+    if (!adminPlayersState.players || adminPlayersState.players.length === 0) {
+      return '<p class="stickfight-empty">No players found.</p>';
+    }
+    const hasCreatedAt = adminPlayersState.players.some((player) => !!player.createdAt);
+    const hasActive = adminPlayersState.players.some((player) => typeof player.active === 'boolean');
+    const headerCells = [`<th>Name</th>`, `<th>Code Word</th>`];
+    if (hasCreatedAt) {
+      headerCells.push('<th>Created At</th>');
+    }
+    if (hasActive) {
+      headerCells.push('<th>Active</th>');
+    }
+    const rows = adminPlayersState.players
+      .slice()
+      .sort((a, b) => {
+        const nameCompare = a.name.localeCompare(b.name);
+        if (nameCompare !== 0) {
+          return nameCompare;
+        }
+        return a.codeWord.localeCompare(b.codeWord);
+      })
+      .map((player) => {
+        const nameCell = `<td>${escapeHtml(player.name)}</td>`;
+        const codeWord = escapeHtml(player.codeWord);
+        const codeCell = `
+          <td class="stickfight-admin-player-code">
+            <span class="stickfight-admin-player-codeword">${codeWord}</span>
+            <button type="button" class="stickfight-primary-button stickfight-admin-copy-code" data-code-word="${codeWord}">Copy</button>
+          </td>
+        `;
+        const createdAtCell = hasCreatedAt
+          ? `<td>${player.createdAt ? escapeHtml(player.createdAt.toLocaleString()) : ''}</td>`
+          : '';
+        const activeCell = hasActive
+          ? `<td>${
+              typeof player.active === 'boolean'
+                ? escapeHtml(player.active ? 'Yes' : 'No')
+                : ''
+            }</td>`
+          : '';
+        return `<tr>${nameCell}${codeCell}${createdAtCell}${activeCell}</tr>`;
+      })
+      .join('');
+    return `
+      <table class="stickfight-admin-table">
+        <thead>
+          <tr>${headerCells.join('')}</tr>
+        </thead>
+        <tbody>
+          ${rows}
+        </tbody>
+      </table>
+    `;
+  };
+
+  const updateAdminPlayersTable = () => {
+    if (!overlayState.panel) {
+      return;
+    }
+    const container = overlayState.panel.querySelector('#stickfight-admin-players-table');
+    if (!container) {
+      return;
+    }
+    container.innerHTML = renderAdminPlayersTableMarkup();
+  };
+
+  const refreshAdminPlayersFromSnapshot = (snapshot) => {
+    const docs = snapshot && snapshot.docs ? snapshot.docs : [];
+    const players = docs.map((doc) => {
+      const data = doc.data ? doc.data() || {} : {};
+      const rawName = typeof data.name === 'string' ? data.name.trim() : '';
+      const name = rawName || 'Unnamed Player';
+      const rawCodeWord = typeof data.codeWord === 'string' ? data.codeWord : '';
+      const sanitizedCodeWord = sanitizeCodeWord(rawCodeWord) || sanitizeCodeWord(doc.id) || doc.id.toUpperCase();
+      let createdAt = null;
+      if (data.createdAt && typeof data.createdAt.toDate === 'function') {
+        try {
+          createdAt = data.createdAt.toDate();
+        } catch (error) {
+          createdAt = null;
+        }
+      }
+      const active = typeof data.active === 'boolean' ? data.active : null;
+      return {
+        id: doc.id,
+        name,
+        codeWord: sanitizedCodeWord,
+        createdAt,
+        active,
+      };
+    });
+    adminPlayersState.players = players;
+    updateAdminPlayersTable();
+    return players.length;
+  };
+
+  const startAdminPlayersListener = async () => {
+    if (adminPlayersState.listening) {
+      return;
+    }
+    adminPlayersState.listening = true;
+    try {
+      const firestore = ensureFirestore();
+      if (!firestore || typeof firestore.collection !== 'function') {
+        adminPlayersState.listening = false;
+        return;
+      }
+      const collectionRef = firestore.collection('players');
+      adminPlayersState.unsubscribe = collectionRef.onSnapshot(
+        (snapshot) => {
+          refreshAdminPlayersFromSnapshot(snapshot);
+        },
+        (error) => {
+          adminPlayersState.listening = false;
+          handleFirestoreError('listen', error);
+        }
+      );
+    } catch (error) {
+      adminPlayersState.listening = false;
+      handleFirestoreError('listen', error);
+    }
   };
 
 const updateRoomsFromMetadata = () => {
@@ -1922,41 +2094,70 @@ await withFirestoreErrorHandling('listen', async () => {
     }
     showOverlay();
     overlayState.contentLocked = false;
-    const storedAdminCode = getStoredAdminAddCode();
+
+    const structureOptions = resolveRoomStructureOptions();
+    const arenaDefault = structureOptions.find(
+      (option) => option && option.value && option.value.toLowerCase() === 'arena'
+    );
+    const defaultStructureValue = arenaDefault ? arenaDefault.value : getDefaultRoomStructure();
+    const structureOptionsMarkup = structureOptions
+      .map((option) => {
+        if (!option || !option.value) {
+          return '';
+        }
+        const value = escapeHtml(option.value);
+        const label = escapeHtml(option.label || option.value);
+        const selected = option.value === defaultStructureValue ? ' selected' : '';
+        return `<option value="${value}"${selected}>${label}</option>`;
+      })
+      .join('');
+
     renderView(
       'admin',
       `
       <h2>Admin Controls</h2>
       <p>Manage rooms for debugging and moderation. Be careful—deletions are permanent.</p>
-      <div class="stickfight-admin-grid">
-        <form class="stickfight-admin-inline stickfight-admin-add-form" id="stickfight-admin-add-player-form">
-          <input type="text" id="stickfight-admin-add-code" name="adminCode" placeholder="Admin add code" autocomplete="off" value="${escapeHtml(storedAdminCode)}" />
-          <input type="text" id="stickfight-admin-player-name" name="playerName" placeholder="Player name" autocomplete="off" maxlength="64" />
-          <input type="text" id="stickfight-admin-player-color" name="playerColor" placeholder="#RRGGBB" autocomplete="off" />
-          <button type="submit" class="stickfight-primary-button" id="stickfight-admin-add-submit">Create Player</button>
-        </form>
-        <div class="stickfight-admin-add-result hidden" id="stickfight-admin-add-result">
-          <div class="stickfight-admin-add-message" id="stickfight-admin-add-message"></div>
-          <div class="stickfight-share-row">
-            <input type="text" id="stickfight-admin-add-codeword" readonly />
-            <button type="button" class="stickfight-secondary-button" id="stickfight-admin-add-copy">Copy</button>
-          </div>
-        </div>
-        <button type="button" class="stickfight-primary-button" id="stickfight-admin-create-room">Create Open Room</button>
-        <form class="stickfight-admin-inline" id="stickfight-admin-delete-form">
-          <input type="text" id="stickfight-admin-delete-code" name="code" placeholder="Room code" autocomplete="off" />
-          <button type="submit" class="stickfight-secondary-button">Delete by Code</button>
-        </form>
-        <form class="stickfight-admin-inline" id="stickfight-admin-delete-all-form">
-          <input type="text" id="stickfight-admin-delete-all-confirm" name="confirm" placeholder="Type DELETE ALL" autocomplete="off" />
-          <button type="submit" class="stickfight-secondary-button">Delete All Rooms</button>
-        </form>
-        <div class="stickfight-admin-status" id="stickfight-admin-status"></div>
-        <div class="stickfight-admin-actions">
-          <button type="button" class="stickfight-secondary-button" id="stickfight-admin-back">Back</button>
-        </div>
+      <div class="stickfight-admin-sections">
+        <section class="stickfight-admin-section">
+          <h3>Create Room</h3>
+          <form class="stickfight-admin-form" id="stickfight-admin-create-room-form">
+            <label class="stickfight-admin-field">
+              <span>Room Name</span>
+              <input type="text" id="stickfight-admin-room-name" name="roomName" maxlength="64" autocomplete="off" placeholder="Room name" required />
+            </label>
+            <label class="stickfight-admin-field">
+              <span>Structure</span>
+              <select id="stickfight-admin-room-structure" name="structure">${structureOptionsMarkup}</select>
+            </label>
+            <button type="submit" class="stickfight-primary-button" id="stickfight-admin-create-room-submit">Create Room</button>
+          </form>
+        </section>
+        <section class="stickfight-admin-section">
+          <h3>Rooms</h3>
+          <div id="stickfight-admin-rooms-table" class="stickfight-admin-table-container"></div>
+        </section>
+        <section class="stickfight-admin-section">
+          <h3>Create Player</h3>
+          <form class="stickfight-admin-form" id="stickfight-admin-add-player-form">
+            <label class="stickfight-admin-field">
+              <span>Player Name</span>
+              <input type="text" id="stickfight-admin-player-name" name="playerName" maxlength="64" autocomplete="off" placeholder="Player name" required />
+            </label>
+            <label class="stickfight-admin-field">
+              <span>Player Color (optional)</span>
+              <input type="text" id="stickfight-admin-player-color" name="playerColor" autocomplete="off" placeholder="#RRGGBB" />
+            </label>
+            <button type="submit" class="stickfight-primary-button" id="stickfight-admin-add-submit">Create Player</button>
+          </form>
+          <div id="stickfight-admin-players-table" class="stickfight-admin-table-container"></div>
+        </section>
+      </div>
+      <div class="stickfight-admin-status" id="stickfight-admin-status"></div>
+      <div class="stickfight-admin-actions">
+        <button type="button" class="stickfight-secondary-button" id="stickfight-admin-back">Back</button>
       </div>
       ${roomsSectionMarkup()}
+
     `
     );
 
@@ -1967,224 +2168,180 @@ await withFirestoreErrorHandling('listen', async () => {
       }
     };
 
+    setStatus('');
+
+    Promise.resolve(startAdminPlayersListener()).catch((error) => {
+      logMessage('[ADMIN]', 'players listener failed', error);
+    });
+
+    updateAdminRoomsTable();
+    updateAdminPlayersTable();
+
+    const createRoomForm = overlayState.panel.querySelector('#stickfight-admin-create-room-form');
+    const roomNameInput = overlayState.panel.querySelector('#stickfight-admin-room-name');
+    const structureSelect = overlayState.panel.querySelector('#stickfight-admin-room-structure');
+    const createRoomButton = overlayState.panel.querySelector('#stickfight-admin-create-room-submit');
+
+    if (structureSelect) {
+      structureSelect.value = defaultStructureValue;
+    }
+
+    if (createRoomForm) {
+      createRoomForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        if (!roomNameInput || !createRoomButton) {
+          return;
+        }
+        const roomNameValue = roomNameInput.value ? roomNameInput.value.trim() : '';
+        if (!roomNameValue) {
+          setStatus('Room name is required.');
+          roomNameInput.focus();
+          return;
+        }
+        const structureValue = structureSelect ? structureSelect.value : defaultStructureValue;
+        const normalizedStructure = normalizeStructureValue(structureValue);
+        setStatus('Creating room...');
+        createRoomButton.disabled = true;
+        try {
+          const record = await adminCreateRoom({ roomName: roomNameValue, structure: normalizedStructure });
+          setStatus(`Room ${record.roomId} created.`);
+          roomNameInput.value = '';
+          updateAdminRoomsTable();
+        } catch (error) {
+          const message = error && error.message ? error.message : 'Failed to create room.';
+          setStatus(message);
+        } finally {
+          createRoomButton.disabled = false;
+        }
+      });
+    }
+
     const addForm = overlayState.panel.querySelector('#stickfight-admin-add-player-form');
-    const adminCodeInput = overlayState.panel.querySelector('#stickfight-admin-add-code');
     const playerNameInput = overlayState.panel.querySelector('#stickfight-admin-player-name');
     const playerColorInput = overlayState.panel.querySelector('#stickfight-admin-player-color');
     const addSubmitButton = overlayState.panel.querySelector('#stickfight-admin-add-submit');
-    const addResultContainer = overlayState.panel.querySelector('#stickfight-admin-add-result');
-    const addMessageEl = overlayState.panel.querySelector('#stickfight-admin-add-message');
-    const codewordInput = overlayState.panel.querySelector('#stickfight-admin-add-codeword');
-    const copyCodewordButton = overlayState.panel.querySelector('#stickfight-admin-add-copy');
-
-    const hideAddResult = () => {
-      if (addResultContainer) {
-        addResultContainer.classList.add('hidden');
-      }
-      if (addMessageEl) {
-        addMessageEl.textContent = '';
-      }
-      if (codewordInput) {
-        codewordInput.value = '';
-      }
-    };
-
-    const showAddResult = (codeWord, playerNameValue) => {
-      if (!addResultContainer) {
-        return;
-      }
-      if (addMessageEl) {
-        addMessageEl.textContent = playerNameValue
-          ? `Player ${playerNameValue} created. Share the code word below.`
-          : 'Player created. Share the code word below.';
-      }
-      if (codewordInput) {
-        codewordInput.value = codeWord;
-        try {
-          codewordInput.select();
-          codewordInput.setSelectionRange(0, codewordInput.value.length);
-        } catch (error) {
-          // ignore selection errors
-        }
-      }
-      addResultContainer.classList.remove('hidden');
-    };
-
-    hideAddResult();
-
-    if (adminCodeInput) {
-      adminCodeInput.addEventListener('input', () => {
-        persistAdminAddCode(adminCodeInput.value || '');
-      });
-    }
 
     if (addForm) {
       addForm.addEventListener('submit', async (event) => {
         event.preventDefault();
-        const adminCodeValue = adminCodeInput ? adminCodeInput.value.trim() : '';
-        const playerNameValue = playerNameInput ? playerNameInput.value.trim() : '';
-        const colorRaw = playerColorInput ? playerColorInput.value : '';
-        const normalizedColor = normalizeHexColorInput(colorRaw);
-        if (!adminCodeValue) {
-          setStatus('Admin code is required.');
-          if (adminCodeInput) {
-            adminCodeInput.focus();
-          }
-          hideAddResult();
+        if (!playerNameInput || !addSubmitButton) {
           return;
         }
+        const playerNameValue = playerNameInput.value ? playerNameInput.value.trim() : '';
         if (!playerNameValue) {
           setStatus('Player name is required.');
-          if (playerNameInput) {
-            playerNameInput.focus();
-          }
-          hideAddResult();
+          playerNameInput.focus();
           return;
         }
-        if (!normalizedColor) {
+        const rawColor = playerColorInput && playerColorInput.value ? playerColorInput.value : '';
+        const normalizedColor = rawColor ? normalizeHexColorInput(rawColor) : '';
+        if (rawColor && !normalizedColor) {
           setStatus('Enter a color in hex format like #FFAA33.');
           if (playerColorInput) {
             playerColorInput.focus();
           }
-          hideAddResult();
           return;
         }
-        if (playerColorInput) {
+        if (playerColorInput && normalizedColor) {
           playerColorInput.value = normalizedColor;
         }
-        persistAdminAddCode(adminCodeValue);
         setStatus('Creating player...');
-        hideAddResult();
-        if (addSubmitButton) {
-          addSubmitButton.disabled = true;
+        addSubmitButton.disabled = true;
+        const payload = { adminCode: ADMIN_ADD_PLAYER_CODE, name: playerNameValue };
+        if (normalizedColor) {
+          payload.color = normalizedColor;
         }
         try {
-          const result = await adminAddPlayer({
-            adminCode: adminCodeValue,
-            name: playerNameValue,
-            color: normalizedColor,
-          });
-          setStatus('Player created. Code word ready to copy.');
-          showAddResult(result.codeWord, playerNameValue);
-          if (playerNameInput) {
-            playerNameInput.value = '';
-          }
+          const result = await adminAddPlayer(payload);
+          setStatus(`Player created with code ${result.codeWord}.`);
+          playerNameInput.value = '';
+          updateAdminPlayersTable();
         } catch (error) {
           const message = error && error.message ? error.message : 'Failed to create player.';
           setStatus(message);
-          hideAddResult();
         } finally {
-          if (addSubmitButton) {
-            addSubmitButton.disabled = false;
-          }
+          addSubmitButton.disabled = false;
         }
       });
     }
 
-    if (codewordInput) {
-      codewordInput.addEventListener('focus', () => {
-        try {
-          codewordInput.select();
-          codewordInput.setSelectionRange(0, codewordInput.value.length);
-        } catch (error) {
-          // ignore selection errors
-        }
-      });
-    }
-
-    if (copyCodewordButton) {
-      copyCodewordButton.addEventListener('click', async () => {
-        if (!codewordInput || !codewordInput.value) {
+    const roomsContainer = overlayState.panel.querySelector('#stickfight-admin-rooms-table');
+    if (roomsContainer) {
+      roomsContainer.addEventListener('click', async (event) => {
+        const rawTarget = event.target;
+        if (!(rawTarget instanceof Element)) {
           return;
         }
+        const button = rawTarget.closest('button.stickfight-admin-room-delete');
+        if (!button) {
+          return;
+        }
+        event.preventDefault();
+        const rawCode = button.getAttribute('data-room-code') || '';
+        const code = sanitizeRoomId(rawCode) || rawCode.trim().toUpperCase();
+        if (!code) {
+          return;
+        }
+        button.disabled = true;
+        setStatus(`Deleting room ${code}...`);
         try {
-          codewordInput.select();
-          codewordInput.setSelectionRange(0, codewordInput.value.length);
+          await adminDeleteRoomByCode(code);
+          setStatus(`Room ${code} deleted.`);
+          updateAdminRoomsTable();
         } catch (error) {
-          // ignore selection errors
+          const message = error && error.message ? error.message : 'Failed to delete room.';
+          setStatus(message);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    }
+
+    const playersContainer = overlayState.panel.querySelector('#stickfight-admin-players-table');
+    if (playersContainer) {
+      playersContainer.addEventListener('click', async (event) => {
+        const rawTarget = event.target;
+        if (!(rawTarget instanceof Element)) {
+          return;
+        }
+        const button = rawTarget.closest('button.stickfight-admin-copy-code');
+        if (!button) {
+          return;
+        }
+        event.preventDefault();
+        const codeWord = button.getAttribute('data-code-word') || '';
+        if (!codeWord) {
+          return;
         }
         let copied = false;
         if (navigator && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
           try {
-            await navigator.clipboard.writeText(codewordInput.value);
+            await navigator.clipboard.writeText(codeWord);
             copied = true;
-          } catch (err) {
+          } catch (error) {
             copied = false;
           }
         }
-        if (!copied) {
+        if (!copied && typeof document !== 'undefined') {
           try {
+            const temp = document.createElement('textarea');
+            temp.value = codeWord;
+            temp.setAttribute('readonly', '');
+            temp.style.position = 'absolute';
+            temp.style.left = '-9999px';
+            document.body.appendChild(temp);
+            temp.select();
             copied = document.execCommand && document.execCommand('copy');
+            document.body.removeChild(temp);
           } catch (error) {
             copied = false;
           }
         }
         setStatus(
-          copied ? 'Player code copied to clipboard!' : 'Copy the code word above to share it.'
+          copied
+            ? `Code word ${codeWord} copied to clipboard.`
+            : 'Copy failed. Select the code word to copy manually.'
         );
-      });
-    }
-
-    const createButton = overlayState.panel.querySelector('#stickfight-admin-create-room');
-    if (createButton) {
-      createButton.addEventListener('click', async () => {
-        logMessage('[ADMIN]', 'create-room click');
-        createButton.disabled = true;
-        setStatus('Creating room...');
-        try {
-          const record = await adminCreateRoom();
-          setStatus(`Room ${record.roomId} created.`);
-        } catch (error) {
-          const message = error && error.message ? error.message : 'Failed to create room.';
-          setStatus(message);
-        } finally {
-          createButton.disabled = false;
-        }
-      });
-    }
-
-    const deleteForm = overlayState.panel.querySelector('#stickfight-admin-delete-form');
-    if (deleteForm) {
-      deleteForm.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const input = overlayState.panel.querySelector('#stickfight-admin-delete-code');
-        const code = input && input.value ? input.value.trim() : '';
-        setStatus('Deleting room...');
-        try {
-          const deletedCode = await adminDeleteRoomByCode(code);
-          setStatus(`Room ${deletedCode} deleted.`);
-          if (input) {
-            input.value = '';
-          }
-        } catch (error) {
-          const message = error && error.message ? error.message : 'Failed to delete room.';
-          setStatus(message);
-        }
-      });
-    }
-
-    const deleteAllForm = overlayState.panel.querySelector('#stickfight-admin-delete-all-form');
-    if (deleteAllForm) {
-      deleteAllForm.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const confirmInput = overlayState.panel.querySelector('#stickfight-admin-delete-all-confirm');
-        const confirmValue = confirmInput && confirmInput.value ? confirmInput.value.trim() : '';
-        if (confirmValue !== 'DELETE ALL') {
-          setStatus('Type DELETE ALL to confirm.');
-          return;
-        }
-        logMessage('[ADMIN]', 'delete-all click');
-        setStatus('Deleting all rooms...');
-        try {
-          const count = await adminDeleteAllRooms();
-          setStatus(`Deleted ${count} room${count === 1 ? '' : 's'}.`);
-          if (confirmInput) {
-            confirmInput.value = '';
-          }
-        } catch (error) {
-          const message = error && error.message ? error.message : 'Failed to delete rooms.';
-          setStatus(message);
-        }
       });
     }
 
@@ -2194,8 +2351,6 @@ await withFirestoreErrorHandling('listen', async () => {
         goToRoute('#/lobby');
       });
     }
-
-    updateRoomsTable();
   };
 
   const hideOverlay = () => {
@@ -2506,45 +2661,89 @@ await withFirestoreErrorHandling('listen', async () => {
         color: rgba(200, 224, 255, 0.7);
         font-size: 0.95rem;
       }
-      .stickfight-admin-grid {
+      .stickfight-admin-sections {
         display: flex;
         flex-direction: column;
-        gap: 18px;
+        gap: 28px;
         margin-bottom: 24px;
       }
-      .stickfight-admin-inline {
+      .stickfight-admin-section {
         display: flex;
-        gap: 12px;
-        align-items: center;
-      }
-      .stickfight-admin-inline input[type="text"],
-      .stickfight-admin-inline select {
-        flex: 1;
-      }
-      .stickfight-admin-add-form {
-        flex-wrap: wrap;
-        align-items: stretch;
-      }
-      .stickfight-admin-add-form input[type="text"] {
-        flex: 1 1 160px;
-        min-width: 140px;
-      }
-      .stickfight-admin-add-form button {
-        flex: 0 0 auto;
-      }
-      .stickfight-admin-add-result {
-        padding: 14px 16px;
-        border-radius: 10px;
-        background: rgba(9, 40, 60, 0.6);
+        flex-direction: column;
+        gap: 16px;
+        padding: 20px;
+        border-radius: 12px;
         border: 1px solid rgba(11, 180, 255, 0.25);
+        background: rgba(9, 24, 38, 0.55);
       }
-      .stickfight-admin-add-message {
+      .stickfight-admin-section h3 {
+        margin: 0;
+        font-size: 1.1rem;
         font-weight: 600;
-        color: rgba(182, 235, 255, 0.95);
-        margin-bottom: 8px;
+      }
+      .stickfight-admin-form {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .stickfight-admin-field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-weight: 600;
+        font-size: 0.95rem;
+        color: rgba(230, 240, 255, 0.92);
+      }
+      .stickfight-admin-form input[type="text"],
+      .stickfight-admin-form select {
+        border-radius: 10px;
+        padding: 12px 14px;
+        border: 1px solid rgba(13, 160, 245, 0.35);
+        background: rgba(255, 255, 255, 0.06);
+        color: #ffffff;
+        font-size: 1rem;
+        outline: none;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      }
+      .stickfight-admin-form input[type="text"]:focus,
+      .stickfight-admin-form select:focus {
+        border-color: rgba(11, 180, 255, 0.9);
+        box-shadow: 0 0 0 3px rgba(11, 180, 255, 0.25);
+      }
+      .stickfight-admin-table-container {
+        overflow-x: auto;
+      }
+      .stickfight-admin-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.95rem;
+      }
+      .stickfight-admin-table th,
+      .stickfight-admin-table td {
+        padding: 10px 12px;
+        text-align: left;
+        border-bottom: 1px solid rgba(11, 180, 255, 0.12);
+      }
+      .stickfight-admin-table tbody tr:hover {
+        background: rgba(11, 180, 255, 0.08);
+      }
+      .stickfight-admin-room-actions {
+        text-align: right;
+        width: 1%;
+        white-space: nowrap;
+      }
+      .stickfight-admin-player-code {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        white-space: nowrap;
+      }
+      .stickfight-admin-player-codeword {
+        font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        letter-spacing: 0.12em;
       }
       .stickfight-admin-status {
-        min-height: 1.2em;
+        min-height: 1.4em;
         font-size: 0.95rem;
         color: rgba(182, 235, 255, 0.9);
       }
