@@ -22,6 +22,16 @@ firebase auth:users:set-claims <ADMIN_UID> '{"admin": true}' --project stick-fig
 
 After the claim is set, the administrator should re-authenticate (or refresh their ID token) before using the admin panel.
 
+To grab the administrator UID before running these scripts, check the server logs for a line that looks like `[AUTH] result code=ok uid=<ADMIN_UID>`. Copy the value that appears after `uid=` and supply it to the script.
+
+You can also apply the claim locally with Node.js:
+
+```bash
+node tools/set-claim.js <ADMIN_UID>
+```
+
+On success, the script prints `Admin claim set for UID: <ADMIN_UID>`.
+
 ## Authorized domains
 
 Ensure the following domains are listed under **Authentication → Settings → Authorized domains** in the Firebase console:
