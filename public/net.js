@@ -35,6 +35,7 @@
   const netState = {
     initialized: false,
     firestore: null,
+    functions: null,
     fieldValue: null,
     auth: null,
     roomId: null,
@@ -174,6 +175,23 @@
       netState.fieldValue = firebase.firestore.FieldValue;
     }
     return firestoreInstance;
+  };
+
+  const ensureFunctions = () => {
+    if (netState.functions) {
+      return netState.functions;
+    }
+    const firebase = firebaseNamespace();
+    if (!firebase || typeof firebase.functions !== 'function') {
+      throw new Error('Functions SDK is not available.');
+    }
+    const app = ensureFirebaseApp();
+    const functionsInstance = firebase.functions(app);
+    if (!functionsInstance) {
+      throw new Error('Functions SDK is not available.');
+    }
+    netState.functions = functionsInstance;
+    return functionsInstance;
   };
 
   const ensureKeyVerification = async () => {
@@ -1332,6 +1350,11 @@ await withFirestoreErrorHandling('listen', async () => {
         </form>
         <div class="stickfight-admin-status" id="stickfight-admin-status"></div>
         <div style="display: flex; justify-content: flex-end; gap: 12px;">
+          ${
+            overlayState.isAdmin
+              ? '<button type="button" class="stickfight-secondary-button" id="stickfight-admin-signout">Sign out admin</button>'
+              : ''
+          }
           <button type="button" class="stickfight-secondary-button" id="stickfight-admin-back">Back</button>
         </div>
       </div>
@@ -1404,6 +1427,69 @@ await withFirestoreErrorHandling('listen', async () => {
         } catch (error) {
           const message = error && error.message ? error.message : 'Failed to delete rooms.';
           setStatus(message);
+        }
+      });
+    }
+
+    const signOutButton = overlayState.panel.querySelector('#stickfight-admin-signout');
+    if (signOutButton) {
+      signOutButton.addEventListener('click', async () => {
+        if (signOutButton.disabled) {
+          return;
+        }
+        signOutButton.disabled = true;
+        setStatus('Revoking admin access...');
+        try {
+          const { auth, user } = await ensureSignedInUser();
+          const currentUser = user || (auth && auth.currentUser) || null;
+          if (!currentUser || typeof currentUser.getIdToken !== 'function') {
+            throw new Error('No authenticated user available.');
+          }
+
+          const callableResult = await withFirestoreErrorHandling('callable/revokeAdmin', async () => {
+            const functions = ensureFunctions();
+            if (!functions || typeof functions.httpsCallable !== 'function') {
+              throw new Error('Cloud Functions callable is not available.');
+            }
+            const callable = functions.httpsCallable('revokeAdmin');
+            return callable();
+          });
+
+          try {
+            await currentUser.getIdToken(true);
+          } catch (tokenError) {
+            logMessage('[ADMIN]', 'revoke-admin token refresh failed', tokenError);
+          }
+
+          let refreshedClaims = null;
+          try {
+            if (typeof currentUser.getIdTokenResult === 'function') {
+              const tokenResult = await currentUser.getIdTokenResult(true);
+              refreshedClaims = tokenResult && tokenResult.claims ? tokenResult.claims : null;
+            }
+          } catch (claimsError) {
+            logMessage('[ADMIN]', 'revoke-admin claims refresh failed', claimsError);
+          }
+
+          overlayState.claims = refreshedClaims;
+          overlayState.isAdmin = false;
+          overlayState.adminOverride = false;
+          _adminCheckPromise = null;
+          setBannerMessage(null);
+
+          const callableData =
+            callableResult && typeof callableResult === 'object' && Object.prototype.hasOwnProperty.call(callableResult, 'data')
+              ? callableResult.data
+              : callableResult;
+          logMessage('[ADMIN]', 'revoke-admin complete', { result: callableData, claims: refreshedClaims });
+
+          setStatus('Admin access revoked.');
+          hideOverlay();
+        } catch (error) {
+          logMessage('[ADMIN]', 'revoke-admin failed', error);
+          const message = error && error.message ? error.message : 'Failed to revoke admin access.';
+          setStatus(message);
+          signOutButton.disabled = false;
         }
       });
     }
@@ -2050,6 +2136,7 @@ await withFirestoreErrorHandling('listen', async () => {
   global.StickFightNet = Object.assign(namespace, {
     state: netState,
     ensureFirestore,
+    ensureFunctions,
     ensureAuth,
     ensureSignedInUser,
     ensureAuthReady,
