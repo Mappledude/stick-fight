@@ -86,6 +86,44 @@
         transform: translateY(-1px);
       }
 
+      .room-actions {
+        position: absolute;
+        top: 16px;
+        left: 16px;
+        display: flex;
+        gap: 10px;
+        pointer-events: none;
+        z-index: 5;
+      }
+
+      .room-leave-button {
+        pointer-events: auto;
+        font: 600 12px/1.2 system-ui;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        border-radius: 999px;
+        padding: 8px 16px;
+        border: 1px solid rgba(255, 255, 255, 0.35);
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        cursor: pointer;
+        transition: background 0.2s ease, border-color 0.2s ease;
+      }
+
+      .room-leave-button:hover {
+        background: rgba(255, 255, 255, 0.18);
+        border-color: rgba(255, 255, 255, 0.6);
+      }
+
+      .room-leave-button:active {
+        background: rgba(255, 255, 255, 0.28);
+      }
+
+      .room-leave-button:focus-visible {
+        outline: 2px solid rgba(0, 168, 255, 0.65);
+        outline-offset: 2px;
+      }
+
       .stage-line {
         position: absolute;
         top: 50%;
