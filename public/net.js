@@ -382,6 +382,73 @@ function ensureAuthReady() {
     return new Date();
   };
 
+  const getServerTimestamp = () => {
+    if (netState.fieldValue && typeof netState.fieldValue.serverTimestamp === 'function') {
+      return netState.fieldValue.serverTimestamp();
+    }
+    const firebase = firebaseNamespace();
+    if (
+      firebase &&
+      firebase.firestore &&
+      firebase.firestore.FieldValue &&
+      typeof firebase.firestore.FieldValue.serverTimestamp === 'function'
+    ) {
+      return firebase.firestore.FieldValue.serverTimestamp();
+    }
+    return getTimestampValue();
+  };
+
+  const identityNamespace = () => {
+    if (global && typeof global.StickFightIdentity === 'object') {
+      return global.StickFightIdentity;
+    }
+    if (global && global.StickFightNet && typeof global.StickFightNet.identity === 'object') {
+      return global.StickFightNet.identity;
+    }
+    return null;
+  };
+
+  const randomId = () => {
+    const cryptoObj = typeof global.crypto !== 'undefined' ? global.crypto : null;
+    if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
+      return cryptoObj.randomUUID();
+    }
+    const values =
+      cryptoObj && typeof cryptoObj.getRandomValues === 'function'
+        ? cryptoObj.getRandomValues(new Uint8Array(16))
+        : Array.from({ length: 16 }, () => Math.floor(Math.random() * 256));
+    return Array.from(values, (value) => value.toString(16).padStart(2, '0')).join('');
+  };
+
+  const getDeviceId = () => {
+    const identity = identityNamespace();
+    if (identity && typeof identity.getDeviceId === 'function') {
+      try {
+        const resolved = identity.getDeviceId();
+        if (resolved) {
+          return resolved;
+        }
+      } catch (error) {
+        // fall through to storage fallback
+      }
+    }
+    try {
+      const storage = global && global.localStorage ? global.localStorage : null;
+      if (!storage) {
+        return randomId();
+      }
+      const existing = storage.getItem('deviceId');
+      if (typeof existing === 'string' && existing) {
+        return existing;
+      }
+      const next = randomId();
+      storage.setItem('deviceId', next);
+      return next;
+    } catch (error) {
+      return randomId();
+    }
+  };
+
   const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
   const fallbackAlphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
@@ -479,7 +546,7 @@ function ensureAuthReady() {
     const roomsCollection = firestore.collection('rooms');
     const roomRef = roomsCollection.doc(roomId);
     const playersRef = roomRef.collection('players').doc(hostUid);
-    const now = getTimestampValue();
+    const deviceId = getDeviceId();
     await runTransaction(async (transaction) => {
       const existing = await transaction.get(roomRef);
       if (existing && existing.exists) {
@@ -487,24 +554,44 @@ function ensureAuthReady() {
       }
       transaction.set(roomRef, {
         code: roomId,
-        active: true,
         status: 'open',
-        createdAt: now,
-        updatedAt: now,
-        lastActivityAt: now,
+        active: true,
         maxPlayers: 9,
-        hostPeerId,
-        hostUid,
-        playerCount: 1,
+        createdAt: getServerTimestamp(),
       });
       transaction.set(playersRef, {
         uid: hostUid,
-        peerId: hostPeerId,
-        name: resolvedName,
-        joinedAt: now,
-        isHost: true,
+        deviceId,
+        nick: resolvedName,
+        joinedAt: getServerTimestamp(),
+        lastSeenAt: getServerTimestamp(),
       });
     });
+    const metadataUpdate = {
+      hostPeerId,
+      hostUid,
+      playerCount: 1,
+      updatedAt: getServerTimestamp(),
+      lastActivityAt: getServerTimestamp(),
+    };
+    try {
+      await roomRef.set(metadataUpdate, { merge: true });
+    } catch (error) {
+      logMessage('[ROOM]', `failed to update metadata for code=${roomId}`, error);
+    }
+    try {
+      await playersRef.set(
+        {
+          peerId: hostPeerId,
+          role: 'host',
+          isHost: true,
+          name: resolvedName,
+        },
+        { merge: true }
+      );
+    } catch (error) {
+      logMessage('[ROOM]', `failed to update host player metadata code=${roomId}`, error);
+    }
     logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`);
     return {
       roomId,
@@ -562,6 +649,7 @@ function ensureAuthReady() {
     }
     const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
     const peerId = generatePeerId();
+    const deviceId = getDeviceId();
     const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
     const playersCollection = roomRef.collection('players');
     const [existingPlayerDoc, playersSnapshot] = await Promise.all([
@@ -580,17 +668,23 @@ function ensureAuthReady() {
       if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
         throw new Error('This room is already full.');
       }
-      const now = getTimestampValue();
-      transaction.set(playerDocRef, {
+      const playerData = {
         uid: currentUser.uid,
-        peerId,
-        name: resolvedName,
-        joinedAt: now,
-        isHost: false,
-      });
+        deviceId,
+        nick: resolvedName,
+        lastSeenAt: getServerTimestamp(),
+      };
+      if (!alreadyPresent) {
+        playerData.joinedAt = getServerTimestamp();
+      }
+      if (alreadyPresent) {
+        transaction.update(playerDocRef, playerData);
+      } else {
+        transaction.set(playerDocRef, playerData);
+      }
       const updates = {
-        updatedAt: now,
-        lastActivityAt: now,
+        updatedAt: getServerTimestamp(),
+        lastActivityAt: getServerTimestamp(),
       };
       if (!alreadyPresent) {
         if (netState.fieldValue && typeof netState.fieldValue.increment === 'function') {
@@ -602,6 +696,21 @@ function ensureAuthReady() {
       }
       transaction.update(roomRef, updates);
     });
+
+    try {
+      await playerDocRef.set(
+        {
+          peerId,
+          role: 'guest',
+          isHost: false,
+          name: resolvedName,
+          lastSeenAt: getServerTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch (error) {
+      logMessage('[ROOM]', `failed to update player metadata code=${trimmedRoomId}`, error);
+    }
 
     netState.roomId = trimmedRoomId;
     netState.peerId = peerId;
