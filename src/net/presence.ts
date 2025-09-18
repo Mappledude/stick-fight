@@ -32,7 +32,7 @@ const HEARTBEAT_INTERVAL_MS = 15000;
 
 const DEFAULT_COLORS = ['#37A9FF', '#FF6B6B', '#FFD166', '#06D6A0', '#C792EA', '#FFA500'];
 
-function spawnOnStage(): SpawnPoint {
+export function spawnOnStage(): SpawnPoint {
   const x = ROOM_PAD + Math.random() * (CANVAS_W - 2 * ROOM_PAD);
   return {
     x: Math.round(x),
