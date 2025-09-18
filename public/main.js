@@ -53,6 +53,9 @@
     if (scope && typeof scope.__StickFightFirebaseBootstrap === 'object') {
       return scope.__StickFightFirebaseBootstrap;
     }
+    if (scope && typeof scope.FirebaseBootstrap === 'object') {
+      return scope.FirebaseBootstrap;
+    }
     return null;
   })();
 

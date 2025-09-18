@@ -118,11 +118,78 @@
     }
   }
 
+  var cachedBootstrapPayload = null;
+
+  function bootstrap(Boot) {
+    if (cachedBootstrapPayload) {
+      return cachedBootstrapPayload;
+    }
+
+    var firebase = getFB();
+    if (!firebase) {
+      throw new Error('[BOOTSTRAP][ERR] missing firebase namespace');
+    }
+
+    var app = initFirebase();
+    if (!app) {
+      throw new Error('[BOOTSTRAP][ERR] app unavailable');
+    }
+
+    var firestore = null;
+    if (typeof firebase.firestore === 'function') {
+      firestore = firebase.firestore(app);
+    }
+    if (!firestore) {
+      throw new Error('[BOOTSTRAP][ERR] firestore unavailable');
+    }
+
+    var fieldValue = null;
+    if (firebase.firestore && firebase.firestore.FieldValue) {
+      fieldValue = firebase.firestore.FieldValue;
+    }
+
+    var auth = null;
+    if (typeof firebase.auth === 'function') {
+      try {
+        auth = firebase.auth(app);
+      } catch (_) {
+        auth = null;
+      }
+    }
+
+    cachedBootstrapPayload = {
+      firebase: firebase,
+      app: app,
+      firestore: firestore,
+      fieldValue: fieldValue,
+      auth: auth
+    };
+
+    try {
+      if (Boot && typeof Boot.milestone === 'function') {
+        Boot.milestone('firebase-bootstrap');
+      }
+    } catch (_) {}
+
+    try {
+      if (Boot && typeof Boot.log === 'function') {
+        Boot.log('INIT', 'firebase-bootstrap-ready');
+      }
+    } catch (_) {}
+
+    return cachedBootstrapPayload;
+  }
+
   // Public API (classic—no ESM exports)
-  global.FirebaseBootstrap = {
+  var api = {
     resolveFirebaseConfig: resolveFirebaseConfig,
     initFirebase: initFirebase,
     getAuthCompat: getAuthCompat,
-    ensureSignedInUser: ensureSignedInUser
+    ensureSignedInUser: ensureSignedInUser,
+    bootstrap: bootstrap,
+    getFirebaseConfig: resolveFirebaseConfig
   };
+
+  global.FirebaseBootstrap = api;
+  global.__StickFightFirebaseBootstrap = api;
 })(window);
