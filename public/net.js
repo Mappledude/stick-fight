@@ -26,7 +26,9 @@
   };
 
   const bootFlags = Boot && Boot.flags ? Boot.flags : { debug: false, safe: false, nofs: false, nolobby: false };
-  const NETWORK_DISABLED = !!(bootFlags.safe || bootFlags.nolobby);
+  const SAFE_MODE = !!bootFlags.safe;
+  const NO_LOBBY_FLAG = !!bootFlags.nolobby;
+  const NETWORK_DISABLED = SAFE_MODE || NO_LOBBY_FLAG;
 
   const AUTO_JOIN_FROM_QUERY = false;
   const AUTO_JOIN_FROM_STATE = false;
@@ -3244,16 +3246,22 @@ await withFirestoreErrorHandling('listen', async () => {
     }
   };
 
-  const initializeOverlayFlow = () => {
+  const initializeOverlayFlow = async (opts = {}) => {
+    const skipNetwork = !!opts.skipNetwork;
     if (overlayState.fatalError) {
       renderKeyVerificationError();
       return;
     }
     createStyles();
     ensureOverlay();
-    startLobbyRoomsListener();
     if (!overlayState.overlay) {
       return;
+    }
+    if (!skipNetwork) {
+      await startLobbyRoomsListener();
+    } else {
+      logMessage('[LOBBY]', 'network listeners disabled — overlay shell only');
+      updateRoomsTable();
     }
     const search = (typeof window !== 'undefined' && window.location && window.location.search) || '';
     let roomId = '';
@@ -3293,16 +3301,15 @@ await withFirestoreErrorHandling('listen', async () => {
     if (typeof document === 'undefined') {
       return;
     }
+    const startOverlay = () => initializeOverlayFlow({ skipNetwork: SAFE_MODE || NO_LOBBY_FLAG });
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', initializeOverlayFlow, { once: true });
+      document.addEventListener('DOMContentLoaded', startOverlay, { once: true });
     } else {
-      initializeOverlayFlow();
+      startOverlay();
     }
   };
 
-  if (!NETWORK_DISABLED) {
-    initWhenReady();
-  }
+  initWhenReady();
 
   global.StickFightNet = Object.assign(namespace, {
     state: netState,
