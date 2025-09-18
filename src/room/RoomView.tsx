@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { getAuth, onAuthStateChanged } from 'firebase/auth';
 
 import { CANVAS_H, CANVAS_W } from '../constants/room';
@@ -25,9 +25,12 @@ type RouteParams = {
 export default function RoomView(): JSX.Element {
   const { code: roomCodeParam } = useParams<RouteParams>();
   const roomCode = typeof roomCodeParam === 'string' ? roomCodeParam : '';
+  const navigate = useNavigate();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const playersRef = useRef<Map<string, Player>>(new Map());
   const [selfUid, setSelfUid] = useState<string>(LOCAL_PLACEHOLDER_UID);
+  const leaveSessionRef = useRef<() => Promise<void>>(async () => undefined);
+  const leavingRef = useRef(false);
 
   const initialPlayer = useMemo<Player>(() => {
     const spawn = spawnOnStage();
@@ -128,6 +131,7 @@ export default function RoomView(): JSX.Element {
   // Sync presence with Firestore (best effort) once we have a real UID.
   useEffect(() => {
     if (!roomCode || !selfUid || selfUid === LOCAL_PLACEHOLDER_UID) {
+      leaveSessionRef.current = async () => undefined;
       return () => undefined;
     }
 
@@ -136,12 +140,16 @@ export default function RoomView(): JSX.Element {
     let unsubscribe: (() => void) | null = null;
     let detachControls: (() => void) | null = null;
     let cancelled = false;
+    let leavePromise: Promise<void> | null = null;
 
     setLocalContext(roomCode, selfUid);
     startConsuming(roomCode);
 
     const getPlayer = (uid: string) => map.get(uid);
     const setLocalPos = ({ x, y, dir }: { x: number; y: number; dir: 'L' | 'R' }) => {
+      if (cancelled) {
+        return;
+      }
       const existing = map.get(selfUid) || selfPlayerRef.current;
       const next: Player = {
         ...(existing || selfPlayerRef.current),
@@ -153,6 +161,39 @@ export default function RoomView(): JSX.Element {
       map.set(selfUid, next);
       selfPlayerRef.current = next;
     };
+
+    const runCleanup = (): Promise<void> => {
+      if (leavePromise) {
+        return leavePromise;
+      }
+      leavePromise = (async () => {
+        cancelled = true;
+        detachControls?.();
+        detachControls = null;
+        unsubscribe?.();
+        unsubscribe = null;
+        stopConsuming();
+        clearLocalContext();
+        const handle = presenceHandle;
+        presenceHandle = null;
+        if (handle) {
+          try {
+            await leaveRoom(roomCode, selfUid, handle);
+          } catch {
+            // ignore
+          }
+        } else {
+          try {
+            await leaveRoom(roomCode, selfUid);
+          } catch {
+            // ignore
+          }
+        }
+      })();
+      return leavePromise;
+    };
+
+    leaveSessionRef.current = runCleanup;
 
     (async () => {
       try {
@@ -186,7 +227,13 @@ export default function RoomView(): JSX.Element {
       }
 
       try {
+        if (cancelled) {
+          return;
+        }
         unsubscribe = watchPlayers(roomCode, selfUid, (remoteMap) => {
+          if (cancelled) {
+            return;
+          }
           const localSelf = selfPlayerRef.current;
           remoteMap.forEach((value, key) => {
             if (key === selfUid) {
@@ -223,6 +270,9 @@ export default function RoomView(): JSX.Element {
       }
 
       try {
+        if (cancelled) {
+          return;
+        }
         detachControls = attachControls({ roomCode, uid: selfUid, getPlayer, setLocalPos });
       } catch (error) {
         if (typeof console !== 'undefined' && console && typeof console.warn === 'function') {
@@ -232,27 +282,40 @@ export default function RoomView(): JSX.Element {
     })();
 
     return () => {
-      cancelled = true;
-      detachControls?.();
-      unsubscribe?.();
-      stopConsuming();
-      clearLocalContext();
-      if (presenceHandle) {
-        void leaveRoom(roomCode, selfUid, presenceHandle)
-          .catch(() => undefined)
-          .finally(() => {
-            presenceHandle = null;
-          });
-      }
+      leaveSessionRef.current = async () => undefined;
+      void runCleanup();
     };
   }, [roomCode, selfUid]);
 
   const controlsReady = selfUid !== LOCAL_PLACEHOLDER_UID;
 
+  const handleLeaveRoom = useCallback(async () => {
+    if (leavingRef.current) {
+      return;
+    }
+    leavingRef.current = true;
+    try {
+      await leaveSessionRef.current();
+    } finally {
+      const map = playersRef.current;
+      const preserved = selfPlayerRef.current;
+      map.clear();
+      if (preserved) {
+        map.set(preserved.uid, preserved);
+      }
+      navigate('/', { replace: false });
+    }
+  }, [navigate]);
+
   return (
     <div className="room-view ready">
       <section data-view="room" id="view-room">
         <div className="room-wrap">
+          <div className="room-actions">
+            <button type="button" className="room-leave-button" onClick={handleLeaveRoom}>
+              Leave Room
+            </button>
+          </div>
           <canvas className="room-canvas" width={CANVAS_W} height={CANVAS_H} ref={canvasRef} />
           <div className="room-stage-line" />
         </div>
