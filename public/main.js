@@ -2920,6 +2920,9 @@ this.netOverlay = (typeof this.netOverlay !== 'undefined') ? this.netOverlay : n
       if (!this.stageLine && this.add && typeof this.add.graphics === 'function') {
         this.stageLine = this.add.graphics();
         this.stageLine.setDepth(1000);
+        if (this.stageLine.setScrollFactor) {
+          this.stageLine.setScrollFactor(0);
+        }
       }
 
       if (this.diagnosticsActive() && typeof console !== 'undefined' && console) {
