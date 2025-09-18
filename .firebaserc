@@ -1,5 +1,14 @@
 {
   "projects": {
     "default": "stick-fight-pigeon"
+  },
+  "targets": {
+    "stick-fight-pigeon": {
+      "hosting": {
+        "stick-fight-pigeon": [
+          "stick-fight-pigeon"
+        ]
+      }
+    }
   }
 }
