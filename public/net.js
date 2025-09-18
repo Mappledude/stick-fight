@@ -505,7 +505,6 @@ function ensureAuthReady() {
         isHost: true,
       });
     });
-    logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`);
     return {
       roomId,
       hostPeerId,
@@ -534,6 +533,8 @@ function ensureAuthReady() {
     netState.playerName = resolvedHostName;
     netState.shareUrl = shareUrl;
     netState.initialized = true;
+
+    logMessage('[ROOM]', `created id=${roomId} code=${roomId}`);
 
     emitEvent('roomCreated', {
       roomId,
@@ -610,7 +611,7 @@ function ensureAuthReady() {
     netState.shareUrl = buildShareUrl(trimmedRoomId);
     netState.initialized = true;
 
-    logMessage('[ROOM]', `joined code=${trimmedRoomId} uid=${currentUser.uid} name=${resolvedName}${alreadyPresent ? ' (rejoin)' : ''}`);
+    logMessage('[ROOM]', `joined code=${trimmedRoomId} uid=${currentUser.uid} name=${resolvedName}`);
 
     emitEvent('roomJoined', {
       roomId: trimmedRoomId,
@@ -656,6 +657,7 @@ function ensureAuthReady() {
       throw new Error('Admin privileges are required.');
     }
     const record = await createRoomRecord({ hostUid: user.uid, hostName: 'Admin' });
+    logMessage('[ROOM]', `created id=${record.roomId} code=${record.roomId}`);
     return {
       roomId: record.roomId,
       hostPeerId: record.hostPeerId,
@@ -774,6 +776,7 @@ function ensureAuthReady() {
     lobbyRoomsState.rooms = processed;
     updateRoomsTable();
     logMessage('[LOBBY]', `rooms=${processed.length}`);
+    return processed.length;
   };
 
   const startLobbyRoomsListener = async () => {
@@ -794,10 +797,19 @@ function ensureAuthReady() {
         .collection('rooms')
         .where('status', '==', 'open')
         .where('active', '==', true);
+      logMessage('[LOBBY]', 'attach-listener');
+      let firstSnapshotLogged = false;
       lobbyRoomsState.unsubscribe = query.onSnapshot(
         (snapshot) => {
           Promise.resolve()
             .then(() => refreshRoomsFromSnapshot(snapshot))
+            .then((count) => {
+              if (!firstSnapshotLogged) {
+                const resolvedCount = typeof count === 'number' ? count : lobbyRoomsState.rooms.length;
+                logMessage('[LOBBY]', `rooms=${resolvedCount} first-snapshot`);
+                firstSnapshotLogged = true;
+              }
+            })
             .catch((error) => {
               logMessage('[LOBBY]', 'failed to process rooms snapshot', error);
             });
@@ -896,6 +908,7 @@ function ensureAuthReady() {
     const createButton = overlayState.panel.querySelector('#stickfight-admin-create-room');
     if (createButton) {
       createButton.addEventListener('click', async () => {
+        logMessage('[ADMIN]', 'create-room click');
         createButton.disabled = true;
         setStatus('Creating room...');
         try {
@@ -940,6 +953,7 @@ function ensureAuthReady() {
           setStatus('Type DELETE ALL to confirm.');
           return;
         }
+        logMessage('[ADMIN]', 'delete-all click');
         setStatus('Deleting all rooms...');
         try {
           const count = await adminDeleteAllRooms();
@@ -1281,6 +1295,7 @@ function ensureAuthReady() {
         return;
       }
       busy = true;
+      logMessage('[ROOM]', 'create click');
       errorEl.textContent = '';
       submitButton.disabled = true;
       const name = nameInput ? nameInput.value.trim() : '';
@@ -1418,6 +1433,7 @@ function ensureAuthReady() {
         return;
       }
       busy = true;
+      logMessage('[ROOM]', `join click code=${roomId}`);
       errorEl.textContent = '';
       submitButton.disabled = true;
       const name = nameInput ? nameInput.value.trim() : '';
