@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { CANVAS_H, CANVAS_W } from '../constants/room';
 import MobileControls from './controls/MobileControls';
 import { claimPlayer, ERR_DEVICE_MISMATCH, HeartbeatHandle } from '../net/playerClaim';
 import { setLocalContext, clearLocalContext } from '../net/send';
@@ -208,7 +209,7 @@ export default function RoomView({ roomId, nick, children }: RoomViewProps) {
     <div className="room-view ready">
       <section data-view="room" id="view-room">
         <div className="room-wrap">
-          <canvas className="room-canvas" width={800} height={440} ref={canvasRef} />
+          <canvas className="room-canvas" width={CANVAS_W} height={CANVAS_H} ref={canvasRef} />
           <div className="room-stage-line" />
         </div>
       </section>

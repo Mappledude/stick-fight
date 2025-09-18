@@ -1,3 +1,4 @@
+import { CANVAS_W, ROOM_PAD, STAGE_Y } from '../constants/room';
 import { getPlayerDoc, getServerTimestamp } from './firestoreCompat';
 
 type PresenceOptions = {
@@ -8,6 +9,7 @@ type PresenceOptions = {
 type SpawnPoint = {
   x: number;
   y: number;
+  dir: 'L' | 'R';
 };
 
 type EnterRoomHandle = {
@@ -20,13 +22,12 @@ const HEARTBEAT_INTERVAL_MS = 15000;
 
 const DEFAULT_COLORS = ['#37A9FF', '#FF6B6B', '#FFD166', '#06D6A0', '#C792EA', '#FFA500'];
 
-function randomSpawn(): SpawnPoint {
-  const padding = 20;
-  const width = 800;
-  const height = 440;
+function spawnOnStage(): SpawnPoint {
+  const x = ROOM_PAD + Math.random() * (CANVAS_W - 2 * ROOM_PAD);
   return {
-    x: padding + Math.random() * (width - 2 * padding),
-    y: padding + Math.random() * (height - 2 * padding),
+    x: Math.round(x),
+    y: STAGE_Y,
+    dir: 'R',
   };
 }
 
@@ -41,7 +42,7 @@ export async function enterRoom(
   options: PresenceOptions = {},
 ): Promise<EnterRoomHandle> {
   const ref = getPlayerDoc(roomCode, uid);
-  const spawn = randomSpawn();
+  const spawn = spawnOnStage();
   const color = typeof options.color === 'string' && options.color.trim() ? options.color : randomColor();
   const name = typeof options.name === 'string' && options.name.trim() ? options.name : 'Player';
 
@@ -51,9 +52,11 @@ export async function enterRoom(
     color,
     x: spawn.x,
     y: spawn.y,
-    dir: 'R',
+    dir: spawn.dir,
     ts: getServerTimestamp(),
   };
+
+  console.log('[presence] enterRoom', { roomCode, uid, payload });
 
   await ref.set(payload, { merge: true });
 

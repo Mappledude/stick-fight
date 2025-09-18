@@ -53,17 +53,50 @@ function normalizePresence(doc: SnapshotDoc): PlayerPresence {
 
 export function watchPlayers(
   roomCode: string,
+  selfUid: string,
   onChange: (players: PlayerMap) => void,
 ): () => void {
   const collection = getPlayersCollection(roomCode) as PlayersCollection;
-  const unsubscribe = collection.onSnapshot((snapshot) => {
-    const map: PlayerMap = new Map();
-    snapshot.forEach((doc) => {
-      const presence = normalizePresence(doc);
-      map.set(doc.id, presence);
-    });
-    onChange(map);
-  });
+  const state: {
+    cache: PlayerMap;
+    sawSelfRemote: boolean;
+  } = {
+    cache: new Map(),
+    sawSelfRemote: false,
+  };
+
+  const unsubscribe = collection.onSnapshot(
+    (snapshot) => {
+      const next: PlayerMap = new Map();
+      snapshot.forEach((doc) => {
+        const presence = normalizePresence(doc);
+        next.set(doc.id, presence);
+      });
+
+      const hasSelfRemote = next.has(selfUid);
+      if (hasSelfRemote) {
+        state.sawSelfRemote = true;
+      }
+
+      if (next.size === 0 && !state.sawSelfRemote) {
+        const localSelf = state.cache.get(selfUid);
+        if (localSelf) {
+          next.set(selfUid, localSelf);
+        }
+      }
+
+      state.cache = next;
+      console.log('[players] snapshot', {
+        count: next.size,
+        hasSelfRemote,
+      });
+      onChange(new Map(state.cache));
+    },
+    (error) => {
+      console.error('[players] snapshot ERROR', error);
+    },
+  );
+
   return () => {
     try {
       unsubscribe();
