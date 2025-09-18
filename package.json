@@ -5,7 +5,7 @@
   "scripts": {
     "test": "node --test tests",
     "build:functions": "npm --prefix functions run build",
-    "deploy": "npm run build:functions && firebase deploy"
+    "deploy": "npm run build:functions && firebase deploy --only hosting:stick-fight-pigeon"
   },
   "dependencies": {
     "firebase-admin": "^11.11.0"
