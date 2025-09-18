@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import MobileControls from './controls/MobileControls';
 import { claimPlayer, ERR_DEVICE_MISMATCH, HeartbeatHandle } from '../net/playerClaim';
 import { setLocalContext, clearLocalContext } from '../net/send';
 import { startConsuming, stopConsuming } from '../net/consume';
 import { getDeviceId, ensureAppAndUser } from '../lib/identity';
 import { debugWarn } from '../lib/debug';
+import { mountRoom, type RoomHandle } from '../net/room';
 
 type RoomViewProps = {
   roomId: string;
@@ -26,6 +27,9 @@ export default function RoomView({ roomId, nick, children }: RoomViewProps) {
   const [authError, setAuthError] = useState<{ code?: string; message?: string } | null>(null);
   const [claim, setClaim] = useState<ClaimState | null>(null);
   const [signedInUid, setSignedInUid] = useState<string | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const roomHandleRef = useRef<RoomHandle | null>(null);
+  const controlsReady = Boolean(claim && signedInUid && claim.uid === signedInUid);
 
   useEffect(() => {
     let cancelled = false;
@@ -99,8 +103,47 @@ export default function RoomView({ roomId, nick, children }: RoomViewProps) {
       if (heartbeat) {
         heartbeat.stop();
       }
+      if (roomHandleRef.current) {
+        void roomHandleRef.current.unmount();
+        roomHandleRef.current = null;
+      }
     };
   }, [roomId, nick]);
+
+  useEffect(() => {
+    const uid = claim?.uid;
+    if (!controlsReady || !uid) {
+      return undefined;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      debugWarn('[ROOM] room canvas is not available.');
+      return undefined;
+    }
+
+    let cancelled = false;
+    mountRoom({ roomCode: roomId, uid, canvas, name: nick })
+      .then((handle) => {
+        if (cancelled) {
+          void handle.unmount();
+          return;
+        }
+        roomHandleRef.current = handle;
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          debugWarn('[ROOM] Failed to mount room', error);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      if (roomHandleRef.current) {
+        void roomHandleRef.current.unmount();
+        roomHandleRef.current = null;
+      }
+    };
+  }, [controlsReady, roomId, claim?.uid, nick]);
 
   if (state === 'loading') {
     return (
@@ -161,10 +204,14 @@ export default function RoomView({ roomId, nick, children }: RoomViewProps) {
     );
   }
 
-  const controlsReady = Boolean(claim && signedInUid && claim.uid === signedInUid);
-
   return (
     <div className="room-view ready">
+      <section data-view="room" id="view-room">
+        <div className="room-wrap">
+          <canvas className="room-canvas" width={800} height={440} ref={canvasRef} />
+          <div className="room-stage-line" />
+        </div>
+      </section>
       {children}
       {controlsReady ? <MobileControls /> : null}
     </div>

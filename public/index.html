@@ -48,6 +48,44 @@
         height: 100%;
       }
 
+      #view-room {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        padding: 16px;
+        box-sizing: border-box;
+      }
+
+      .room-wrap {
+        position: relative;
+        width: 800px;
+        height: 440px;
+        margin: 0 auto;
+      }
+
+      .room-canvas {
+        display: block;
+        width: 800px;
+        height: 440px;
+        background: #000;
+        border: 2px solid #fff;
+        border-radius: 8px;
+      }
+
+      .room-stage-line {
+        position: absolute;
+        top: 50%;
+        left: 0;
+        right: 0;
+        height: 0;
+        border-top: 2px solid #fff;
+        pointer-events: none;
+        opacity: 0.9;
+        transform: translateY(-1px);
+      }
+
       .stage-line {
         position: absolute;
         top: 50%;
