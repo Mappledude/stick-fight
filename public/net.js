@@ -55,6 +55,7 @@
     pendingFatalMessage: null,
     contentLocked: false,
     overlayInitRequested: false,
+    bannerMessage: null,
   };
 
   const lobbyRoomsState = {
@@ -471,48 +472,129 @@ function ensureAuthReady() {
     console.log(`${label} ${message}`);
   };
 
-  const createRoomRecord = async ({ hostUid, hostName }) => {
-    const firestore = ensureFirestore();
-    const resolvedName = hostName && hostName.trim() ? hostName.trim() : 'Host';
-    const roomId = generateRoomId();
-    const hostPeerId = generatePeerId();
-    const roomsCollection = firestore.collection('rooms');
-    const roomRef = roomsCollection.doc(roomId);
-    const playersRef = roomRef.collection('players').doc(hostUid);
-    const now = getTimestampValue();
-    await runTransaction(async (transaction) => {
-      const existing = await transaction.get(roomRef);
-      if (existing && existing.exists) {
-        throw new Error('A room with this ID already exists. Please try again.');
+  const ensureBannerElement = () => {
+    if (!overlayState.panel) {
+      return null;
+    }
+    if (typeof document === 'undefined') {
+      return null;
+    }
+    let banner = overlayState.panel.querySelector('[data-stickfight-error-banner]');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.className = 'stickfight-error-banner';
+      banner.setAttribute('data-stickfight-error-banner', 'true');
+      banner.setAttribute('hidden', 'hidden');
+      overlayState.panel.insertBefore(banner, overlayState.panel.firstChild);
+    }
+    return banner;
+  };
+
+  const applyBannerMessage = () => {
+    const banner = ensureBannerElement();
+    if (!banner) {
+      return;
+    }
+    const message = overlayState.bannerMessage;
+    if (message) {
+      banner.textContent = message;
+      banner.removeAttribute('hidden');
+    } else {
+      banner.textContent = '';
+      banner.setAttribute('hidden', 'hidden');
+    }
+  };
+
+  const setBannerMessage = (message) => {
+    overlayState.bannerMessage = message || null;
+    if (overlayState.bannerMessage) {
+      createStyles();
+      ensureOverlay();
+      if (overlayState.overlay) {
+        overlayState.overlay.classList.remove('stickfight-hidden');
       }
-      transaction.set(roomRef, {
-        code: roomId,
-        active: true,
-        status: 'open',
-        createdAt: now,
-        updatedAt: now,
-        lastActivityAt: now,
-        maxPlayers: 9,
+    }
+    applyBannerMessage();
+  };
+
+  const formatFirestoreErrorDetails = (op, error) => {
+    const code = error && typeof error.code === 'string' ? error.code : 'unknown';
+    const rawMessage =
+      error && typeof error.message === 'string' && error.message
+        ? error.message
+        : String(error);
+    return { code, message: rawMessage, formatted: `op=${op} code=${code} msg=${rawMessage}` };
+  };
+
+  const handleFirestoreError = (op, error) => {
+    const details = formatFirestoreErrorDetails(op, error);
+    const alreadyLogged =
+      error && typeof error === 'object' && Object.prototype.hasOwnProperty.call(error, '__stickfightFsLogged');
+    if (!alreadyLogged) {
+      logMessage('[FS][ERR]', details.formatted, error);
+      if (error && typeof error === 'object') {
+        try {
+          error.__stickfightFsLogged = true;
+        } catch (assignError) {
+          // Ignore assignment failure on read-only errors.
+        }
+      }
+    }
+    setBannerMessage(`[FS][ERR] ${details.formatted}`);
+  };
+
+  const withFirestoreErrorHandling = async (op, action) => {
+    try {
+      return await action();
+    } catch (error) {
+      handleFirestoreError(op, error);
+      throw error;
+    }
+  };
+
+  const createRoomRecord = async ({ hostUid, hostName }) =>
+    withFirestoreErrorHandling('create', async () => {
+      const firestore = ensureFirestore();
+      const resolvedName = hostName && hostName.trim() ? hostName.trim() : 'Host';
+      const roomId = generateRoomId();
+      const hostPeerId = generatePeerId();
+      const roomsCollection = firestore.collection('rooms');
+      const roomRef = roomsCollection.doc(roomId);
+      const playersRef = roomRef.collection('players').doc(hostUid);
+      const now = getTimestampValue();
+      await runTransaction(async (transaction) => {
+        const existing = await transaction.get(roomRef);
+        if (existing && existing.exists) {
+          throw new Error('A room with this ID already exists. Please try again.');
+        }
+        transaction.set(roomRef, {
+          code: roomId,
+          active: true,
+          status: 'open',
+          createdAt: now,
+          updatedAt: now,
+          lastActivityAt: now,
+          maxPlayers: 9,
+          hostPeerId,
+          hostUid,
+          playerCount: 1,
+        });
+        transaction.set(playersRef, {
+          uid: hostUid,
+          peerId: hostPeerId,
+          name: resolvedName,
+          joinedAt: now,
+          isHost: true,
+        });
+      });
+      logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`);
+      return {
+        roomId,
         hostPeerId,
         hostUid,
-        playerCount: 1,
-      });
-      transaction.set(playersRef, {
-        uid: hostUid,
-        peerId: hostPeerId,
-        name: resolvedName,
-        joinedAt: now,
-        isHost: true,
-      });
+        hostName: resolvedName,
+      };
     });
-    logMessage('[ROOM]', `created code=${roomId} host=${hostUid} peer=${hostPeerId}`);
-    return {
-      roomId,
-      hostPeerId,
-      hostUid,
-      hostName: resolvedName,
-    };
-  };
 
   const createRoom = async (options) => {
     logConfigScope('room-create');
@@ -548,7 +630,6 @@ function ensureAuthReady() {
   const joinRoom = async (roomId, options) => {
     logConfigScope('room-join');
     await ensureAuthReady();
-    const firestore = ensureFirestore();
     const { auth, user } = await ensureSignedInUser();
     const currentUser = user || (auth && auth.currentUser);
     if (!currentUser || !currentUser.uid) {
@@ -560,47 +641,52 @@ function ensureAuthReady() {
     if (!trimmedRoomId) {
       throw new Error('Room ID is invalid.');
     }
-    const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
     const peerId = generatePeerId();
-    const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
-    const playersCollection = roomRef.collection('players');
-    const [existingPlayerDoc, playersSnapshot] = await Promise.all([
-      playerDocRef.get(),
-      playersCollection.get(),
-    ]);
-    const alreadyPresent = !!(existingPlayerDoc && existingPlayerDoc.exists);
+    let alreadyPresent = false;
 
-    await runTransaction(async (transaction) => {
-      const roomSnapshot = await transaction.get(roomRef);
-      if (!roomSnapshot || !roomSnapshot.exists) {
-        throw new Error('The requested room could not be found.');
-      }
-      const roomData = roomSnapshot.data() || {};
-      const maxPlayers = typeof roomData.maxPlayers === 'number' ? roomData.maxPlayers : 9;
-      if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
-        throw new Error('This room is already full.');
-      }
-      const now = getTimestampValue();
-      transaction.set(playerDocRef, {
-        uid: currentUser.uid,
-        peerId,
-        name: resolvedName,
-        joinedAt: now,
-        isHost: false,
-      });
-      const updates = {
-        updatedAt: now,
-        lastActivityAt: now,
-      };
-      if (!alreadyPresent) {
-        if (netState.fieldValue && typeof netState.fieldValue.increment === 'function') {
-          updates.playerCount = netState.fieldValue.increment(1);
-        } else {
-          const currentCount = typeof roomData.playerCount === 'number' ? roomData.playerCount : playersSnapshot.size;
-          updates.playerCount = currentCount + 1;
+    await withFirestoreErrorHandling('update', async () => {
+      const firestore = ensureFirestore();
+      const roomRef = firestore.collection('rooms').doc(trimmedRoomId);
+      const playerDocRef = roomRef.collection('players').doc(currentUser.uid);
+      const playersCollection = roomRef.collection('players');
+      const [existingPlayerDoc, playersSnapshot] = await Promise.all([
+        playerDocRef.get(),
+        playersCollection.get(),
+      ]);
+      alreadyPresent = !!(existingPlayerDoc && existingPlayerDoc.exists);
+
+      await runTransaction(async (transaction) => {
+        const roomSnapshot = await transaction.get(roomRef);
+        if (!roomSnapshot || !roomSnapshot.exists) {
+          throw new Error('The requested room could not be found.');
         }
-      }
-      transaction.update(roomRef, updates);
+        const roomData = roomSnapshot.data() || {};
+        const maxPlayers = typeof roomData.maxPlayers === 'number' ? roomData.maxPlayers : 9;
+        if (!alreadyPresent && playersSnapshot && playersSnapshot.size >= maxPlayers) {
+          throw new Error('This room is already full.');
+        }
+        const now = getTimestampValue();
+        transaction.set(playerDocRef, {
+          uid: currentUser.uid,
+          peerId,
+          name: resolvedName,
+          joinedAt: now,
+          isHost: false,
+        });
+        const updates = {
+          updatedAt: now,
+          lastActivityAt: now,
+        };
+        if (!alreadyPresent) {
+          if (netState.fieldValue && typeof netState.fieldValue.increment === 'function') {
+            updates.playerCount = netState.fieldValue.increment(1);
+          } else {
+            const currentCount = typeof roomData.playerCount === 'number' ? roomData.playerCount : playersSnapshot.size;
+            updates.playerCount = currentCount + 1;
+          }
+        }
+        transaction.update(roomRef, updates);
+      });
     });
 
     netState.roomId = trimmedRoomId;
@@ -621,33 +707,36 @@ function ensureAuthReady() {
     return { roomId: trimmedRoomId, peerId, name: resolvedName };
   };
 
-  const deleteCollectionDocs = async (collectionRef, batchSize = 50) => {
-    const firestore = ensureFirestore();
-    let snapshot = await collectionRef.limit(batchSize).get();
-    while (snapshot && !snapshot.empty) {
-      const batch = firestore.batch();
-      snapshot.docs.forEach((doc) => {
-        batch.delete(doc.ref);
-      });
-      await batch.commit();
-      snapshot = await collectionRef.limit(batchSize).get();
-    }
-  };
-
-  const deleteRoomDocument = async (roomRef) => {
-    const subcollections = ['players', 'signals'];
-    for (let i = 0; i < subcollections.length; i += 1) {
-      const sub = subcollections[i];
-      try {
-        const subRef = roomRef.collection(sub);
-        await deleteCollectionDocs(subRef);
-      } catch (error) {
-        logMessage('[ROOM]', `failed to delete ${sub} for code=${roomRef.id}`, error);
+  const deleteCollectionDocs = async (collectionRef, batchSize = 50) =>
+    withFirestoreErrorHandling('update', async () => {
+      const firestore = ensureFirestore();
+      let snapshot = await collectionRef.limit(batchSize).get();
+      while (snapshot && !snapshot.empty) {
+        const batch = firestore.batch();
+        snapshot.docs.forEach((doc) => {
+          batch.delete(doc.ref);
+        });
+        await batch.commit();
+        snapshot = await collectionRef.limit(batchSize).get();
       }
-    }
-    await roomRef.delete();
-    logMessage('[ROOM]', `deleted code=${roomRef.id}`);
-  };
+    });
+
+  const deleteRoomDocument = async (roomRef) =>
+    withFirestoreErrorHandling('update', async () => {
+      const subcollections = ['players', 'signals'];
+      for (let i = 0; i < subcollections.length; i += 1) {
+        const sub = subcollections[i];
+        try {
+          const subRef = roomRef.collection(sub);
+          await deleteCollectionDocs(subRef);
+        } catch (error) {
+          handleFirestoreError('update', error);
+          logMessage('[ROOM]', `failed to delete ${sub} for code=${roomRef.id}`, error);
+        }
+      }
+      await roomRef.delete();
+      logMessage('[ROOM]', `deleted code=${roomRef.id}`);
+    });
 
   const adminCreateRoom = async () => {
     logConfigScope('admin-create-room');
@@ -669,25 +758,29 @@ function ensureAuthReady() {
       throw new Error('Room code is required.');
     }
     await ensureAdminPrivileges();
-    const firestore = ensureFirestore();
-    const roomRef = firestore.collection('rooms').doc(trimmed);
-    const snapshot = await roomRef.get();
-    if (!snapshot.exists) {
-      throw new Error('Room not found.');
-    }
-    await deleteRoomDocument(roomRef);
-    return trimmed;
+    return withFirestoreErrorHandling('update', async () => {
+      const firestore = ensureFirestore();
+      const roomRef = firestore.collection('rooms').doc(trimmed);
+      const snapshot = await roomRef.get();
+      if (!snapshot.exists) {
+        throw new Error('Room not found.');
+      }
+      await deleteRoomDocument(roomRef);
+      return trimmed;
+    });
   };
 
   const adminDeleteAllRooms = async () => {
     await ensureAdminPrivileges();
-    const firestore = ensureFirestore();
-    const roomsSnapshot = await firestore.collection('rooms').get();
-    const docs = roomsSnapshot.docs || [];
-    for (let i = 0; i < docs.length; i += 1) {
-      await deleteRoomDocument(docs[i].ref);
-    }
-    return docs.length;
+    return withFirestoreErrorHandling('update', async () => {
+      const firestore = ensureFirestore();
+      const roomsSnapshot = await firestore.collection('rooms').get();
+      const docs = roomsSnapshot.docs || [];
+      for (let i = 0; i < docs.length; i += 1) {
+        await deleteRoomDocument(docs[i].ref);
+      }
+      return docs.length;
+    });
   };
 
   const roomsSectionMarkup = (includeAdminButton = true) => `
@@ -758,6 +851,7 @@ function ensureAuthReady() {
             const playersSnapshot = await doc.ref.collection('players').get();
             playerCount = playersSnapshot.size;
           } catch (error) {
+            handleFirestoreError('listen', error);
             playerCount = 0;
           }
         }
@@ -788,24 +882,27 @@ function ensureAuthReady() {
       logMessage('[LOBBY]', 'failed to initialize auth for lobby rooms', error);
       return;
     }
-    const firestore = ensureFirestore();
     try {
-      const query = firestore
-        .collection('rooms')
-        .where('status', '==', 'open')
-        .where('active', '==', true);
-      lobbyRoomsState.unsubscribe = query.onSnapshot(
-        (snapshot) => {
-          Promise.resolve()
-            .then(() => refreshRoomsFromSnapshot(snapshot))
-            .catch((error) => {
-              logMessage('[LOBBY]', 'failed to process rooms snapshot', error);
-            });
-        },
-        (error) => {
-          logMessage('[LOBBY]', 'rooms snapshot error', error);
-        }
-      );
+      await withFirestoreErrorHandling('listen', async () => {
+        const firestore = ensureFirestore();
+        const query = firestore
+          .collection('rooms')
+          .where('status', '==', 'open')
+          .where('active', '==', true);
+        lobbyRoomsState.unsubscribe = query.onSnapshot(
+          (snapshot) => {
+            Promise.resolve()
+              .then(() => refreshRoomsFromSnapshot(snapshot))
+              .catch((error) => {
+                logMessage('[LOBBY]', 'failed to process rooms snapshot', error);
+              });
+          },
+          (error) => {
+            handleFirestoreError('listen', error);
+            logMessage('[LOBBY]', 'rooms snapshot error', error);
+          }
+        );
+      });
     } catch (error) {
       logMessage('[LOBBY]', 'unable to listen for rooms', error);
     }
@@ -1010,6 +1107,20 @@ function ensureAuthReady() {
         box-shadow: 0 28px 60px rgba(2, 6, 14, 0.6);
         padding: 28px 32px;
       }
+      .stickfight-error-banner {
+        margin-bottom: 20px;
+        padding: 14px 18px;
+        border-radius: 12px;
+        background: linear-gradient(135deg, rgba(176, 12, 32, 0.92), rgba(120, 4, 20, 0.92));
+        border: 1px solid rgba(255, 115, 140, 0.75);
+        box-shadow: 0 18px 32px rgba(96, 3, 16, 0.5);
+        color: #ffeef0;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      .stickfight-error-banner[hidden] {
+        display: none;
+      }
       .stickfight-lobby-panel h2 {
         margin: 0 0 12px;
         font-size: 1.6rem;
@@ -1210,6 +1321,7 @@ function ensureAuthReady() {
     if (!opts.force) {
       overlayState.contentLocked = false;
     }
+    applyBannerMessage();
   };
 
   function renderKeyVerificationError(message) {
