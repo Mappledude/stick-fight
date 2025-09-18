@@ -37,7 +37,7 @@ function spawnOnStage(): SpawnPoint {
   return {
     x: Math.round(x),
     y: STAGE_Y,
-    dir: 'R',
+    dir: 'R' as const,
   };
 }
 
@@ -54,7 +54,9 @@ export async function enterRoom(
   const ref = getPlayerDoc(roomCode, uid);
   const spawn = spawnOnStage();
   const color = typeof options.color === 'string' && options.color.trim() ? options.color : randomColor();
-  const name = typeof options.name === 'string' && options.name.trim() ? options.name : 'Player';
+  const fallbackName = `You-${uid.slice(0, 4)}`;
+  const name =
+    typeof options.name === 'string' && options.name.trim().length > 0 ? options.name : fallbackName;
 
   const payload: SpawnPayload = {
     uid,

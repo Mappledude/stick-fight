@@ -9,7 +9,8 @@ type RendererOptions = {
 
 type StopRenderer = () => void;
 
-const STAGE_COLOR = '#fff';
+const BORDER_COLOR = '#fff';
+const STAGE_LINE_COLOR = '#ff2a2a';
 
 export function startRenderer(options: RendererOptions): StopRenderer {
   const { canvas, getPlayers, selfUid } = options;
@@ -99,10 +100,12 @@ export function startRenderer(options: RendererOptions): StopRenderer {
     context.clearRect(0, 0, width, height);
     context.fillStyle = '#000';
     context.fillRect(0, 0, width, height);
-    context.strokeStyle = STAGE_COLOR;
+    context.strokeStyle = BORDER_COLOR;
     context.lineWidth = 2;
     context.strokeRect(1, 1, width - 2, height - 2);
 
+    context.strokeStyle = STAGE_LINE_COLOR;
+    // stage line (RED)
     context.beginPath();
     context.moveTo(0, STAGE_Y);
     context.lineTo(width, STAGE_Y);
